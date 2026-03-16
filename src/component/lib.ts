@@ -159,6 +159,33 @@ export const init = mutation({
   },
 });
 
+// ── Cleanup ────────────────────────────────────────────────────────────
+
+/**
+ * Delete TVars by key. Used to clean up timeout TVars after a
+ * transaction commits (they're no longer needed).
+ */
+export const cleanupKeys = mutation({
+  args: { keys: v.array(v.string()) },
+  returns: v.null(),
+  handler: async (ctx, { keys }) => {
+    for (const key of keys) {
+      const doc = await ctx.db
+        .query("tvars")
+        .withIndex("by_key", (q) => q.eq("key", key))
+        .unique();
+      if (doc) await ctx.db.delete(doc._id);
+      // Also clean up any waiters on this key
+      const waiters = await ctx.db
+        .query("waiters")
+        .withIndex("by_tvar", (q) => q.eq("tvarKey", key))
+        .collect();
+      for (const w of waiters) await ctx.db.delete(w._id);
+    }
+    return null;
+  },
+});
+
 // ── Timeout scheduling ─────────────────────────────────────────────────
 
 /**
@@ -179,7 +206,15 @@ export const fireTimeout = internalMutation({
   args: { key: v.string() },
   returns: v.null(),
   handler: async (ctx, { key }) => {
-    // Write the timeout TVar. This wakes any waiter watching it.
+    // Check if anyone is still waiting on this timeout.
+    // If the TVar was cleaned up (transaction committed), do nothing.
+    const waiters = await ctx.db
+      .query("waiters")
+      .withIndex("by_tvar", (q) => q.eq("tvarKey", key))
+      .collect();
+    if (waiters.length === 0) return null; // Already cleaned up — no-op
+
+    // Write the timeout TVar. This wakes the waiters.
     const existing = await ctx.db
       .query("tvars")
       .withIndex("by_key", (q) => q.eq("key", key))
@@ -190,11 +225,7 @@ export const fireTimeout = internalMutation({
       await ctx.db.insert("tvars", { key, value: true });
     }
 
-    // Wake all waiters on this TVar.
-    const waiters = await ctx.db
-      .query("waiters")
-      .withIndex("by_tvar", (q) => q.eq("tvarKey", key))
-      .collect();
+    // Wake the waiters we already fetched.
     for (const w of waiters) {
       try {
         await ctx.scheduler.runAfter(

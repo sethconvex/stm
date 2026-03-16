@@ -1,4 +1,5 @@
 import { mutation, query, internalMutation, httpAction } from "./_generated/server.js";
+import { createFunctionHandle } from "convex/server";
 import { components, internal } from "./_generated/api.js";
 import { STM } from "@convex-dev/stm";
 import { v } from "convex/values";
@@ -94,8 +95,25 @@ export const placeOrder = mutation({
       }
     }
 
+    // Belt-and-suspenders: schedule hard deadline in case select timeouts
+    // don't fire (timeout TVars are per-run, not persistent across retries)
+    if (timeoutMs) {
+      await ctx.scheduler.runAfter(timeoutMs, internal.example.expireOrder, {
+        orderId: orderId as string,
+      });
+    }
+
     await runOrder(ctx, orderId, items, timeoutMs);
     return orderId;
+  },
+});
+
+export const expireOrder = internalMutation({
+  args: { orderId: v.string() },
+  handler: async (ctx, { orderId }) => {
+    const order = await ctx.db.get(orderId as Id<"orders">);
+    if (!order || order.status === "fulfilled") return;
+    await ctx.db.patch(order._id, { status: "expired" });
   },
 });
 
@@ -114,12 +132,23 @@ async function runOrder(ctx: MutationCtx, orderId: Id<"orders">, items: string[]
   }
 
   // Phase 2: Wait for results (select with timeout)
-  const waitResult = await stm.atomic(ctx, async (tx: TX) => awaitResults(tx, orderId, items, timeoutMs));
+  // Wire onRetry so the transaction re-runs when a TVar changes
+  const retryHandle: string = await createFunctionHandle(internal.example.retryOrder);
+  const waitResult = await stm.atomic(
+    ctx,
+    async (tx: TX) => awaitResults(tx, orderId, items, timeoutMs),
+    {
+      callbackHandle: retryHandle,
+      callbackArgs: { orderId: orderId as string, items: JSON.stringify(items) },
+    },
+  );
   if (waitResult.committed) {
     await ctx.db.patch(orderId, { status: "fulfilled", assignments: waitResult.value });
-  } else if (timeoutMs) {
+  } else if (!waitResult.committed && waitResult.timedOut) {
     await ctx.db.patch(orderId, { status: "expired" });
   }
+  // If not committed and not timed out: onRetry registered waiters + timeouts.
+  // The transaction will re-run when a provider responds or a timeout fires.
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -158,8 +187,29 @@ export const webhookHandler = httpAction(async (ctx, request) => {
 
 export const retryOrder = internalMutation({
   args: { orderId: v.string(), items: v.string() },
-  handler: async (ctx, { orderId, items }) => {
-    await runOrder(ctx, orderId as Id<"orders">, JSON.parse(items));
+  handler: async (ctx, { orderId, items: itemsJson }) => {
+    const order = await ctx.db.get(orderId as Id<"orders">);
+    if (!order || order.status === "fulfilled" || order.status === "expired") return;
+
+    const items: string[] = JSON.parse(itemsJson);
+
+    // Phase 1: resubmit any rejected providers
+    await stm.atomic(ctx, async (tx: TX) => submitAll(tx, orderId, items));
+
+    // Phase 2: check results
+    const retryHandle: string = await createFunctionHandle(internal.example.retryOrder);
+    const waitResult = await stm.atomic(
+      ctx,
+      async (tx: TX) => awaitResults(tx, orderId, items),
+      { callbackHandle: retryHandle, callbackArgs: { orderId, items: itemsJson } },
+    );
+
+    if (waitResult.committed) {
+      await ctx.db.patch(order._id, { status: "fulfilled", assignments: waitResult.value });
+    }
+    // If not committed: waiters registered, will re-run on next TVar change.
+    // If all timeouts fired: select retries forever → order stays submitted.
+    // The timeout expiry is handled by the initial runOrder's timeout scheduling.
   },
 });
 

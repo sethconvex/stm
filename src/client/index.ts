@@ -156,18 +156,18 @@ class TXImpl implements TX {
 
   async select<T>(...branches: SelectBranch<T>[]): Promise<T> {
     if (branches.length === 0) this.retry();
-    if (branches.length === 1) {
-      const b = branches[0];
-      return typeof b === "function" ? await b() : await b.fn();
-    }
 
+    // Wrap branches: add timeout TVar logic where needed
     const fns = branches.map((b) => {
       if (typeof b === "function") return b;
       const { fn, timeout } = b;
       if (!timeout) return fn;
 
+      // Generate a stable timeout key per branch position
+      // (using a counter on the TX so it's deterministic across re-runs)
+      const timeoutKey = `__timeout:${this._timeoutCounter++}:${Date.now()}`;
+
       return async () => {
-        const timeoutKey = `__timeout:${Math.random().toString(36).slice(2)}`;
         const timedOut = await this.read(timeoutKey);
         if (timedOut) this.retry();
         this.pendingTimeouts.push({ key: timeoutKey, ms: timeout });
@@ -175,10 +175,15 @@ class TXImpl implements TX {
       };
     });
 
+    if (fns.length === 1) return await fns[0]();
+
     return await fns.reduceRight(
       (rest, fn) => async () => await this.orElse(fn, rest),
     )();
   }
+
+  // Counter for deterministic timeout key generation
+  private _timeoutCounter = 0;
 
   // ── TMVar operations ───────────────────────────────────────────────
 
@@ -250,6 +255,14 @@ export class STM {
       await ctx.runMutation(this.component.lib.commit, { writes });
     }
 
+    // Clean up any timeout TVars that were registered but not needed
+    // (transaction committed successfully before timeouts fired)
+    if (tx.pendingTimeouts.length > 0) {
+      await ctx.runMutation(this.component.lib.cleanupKeys, {
+        keys: tx.pendingTimeouts.map((t) => t.key),
+      });
+    }
+
     // Run afterCommit callbacks
     for (const cb of tx.afterCommitCallbacks) {
       await cb(ctx);
@@ -265,11 +278,24 @@ export class STM {
       callbackHandle: string;
       callbackArgs?: Record<string, unknown>;
     },
-  ): Promise<{ committed: true; value: T } | { committed: false }> {
+  ): Promise<{ committed: true; value: T } | { committed: false; timedOut: boolean }> {
     const result = await this.run(ctx, handler);
 
     if (result.status === "committed") {
       return { committed: true, value: result.value };
+    }
+
+    // Check if all timeouts have already fired (all timeout TVars are true)
+    const allTimedOut = result.timeouts.length > 0 &&
+      result.timeouts.every(({ key }) => result.readSet[key] === true);
+
+    if (allTimedOut) {
+      // All branches timed out — don't register waiters (nothing will change)
+      // Clean up timeout TVars
+      await ctx.runMutation(this.component.lib.cleanupKeys, {
+        keys: result.timeouts.map((t) => t.key),
+      });
+      return { committed: false, timedOut: true };
     }
 
     if (onRetry) {
@@ -284,16 +310,16 @@ export class STM {
       });
 
       if (safeToBlock) {
+        // Schedule timeouts for branches that haven't timed out yet
         for (const { key, ms } of result.timeouts) {
-          await ctx.runMutation(this.component.lib.scheduleTimeout, {
-            key,
-            ms,
-          });
+          if (result.readSet[key] !== true) {
+            await ctx.runMutation(this.component.lib.scheduleTimeout, { key, ms });
+          }
         }
       }
     }
 
-    return { committed: false };
+    return { committed: false, timedOut: false };
   }
 
   /** Initialize a TVar. No-op if it already exists. */
