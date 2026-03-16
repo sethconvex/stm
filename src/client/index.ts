@@ -112,10 +112,12 @@ class TXImpl implements TX {
   writeSet: Record<string, unknown> = {};
   pendingTimeouts: { key: string; ms: number }[] = [];
   afterCommitCallbacks: ((ctx: MutationCtx) => Promise<void>)[] = [];
+  private _timeoutCounter = 0;
 
   constructor(
     private ctx: MutationCtx,
     private component: ComponentApi,
+    private txId: string,
   ) {}
 
   async read(key: string): Promise<unknown> {
@@ -145,11 +147,18 @@ class TXImpl implements TX {
     } catch (e) {
       if (!isRetrySignal(e)) throw e;
       const fn1Reads = { ...this.readSet };
+      const fn1Timeouts = [...this.pendingTimeouts];
       this.readSet = savedReadSet;
       this.writeSet = savedWriteSet;
       this.pendingTimeouts = savedTimeouts;
       this.afterCommitCallbacks = savedCallbacks;
+      // Keep fn1's reads (for combined watch set) and timeouts (for deadline tracking)
       Object.assign(this.readSet, fn1Reads);
+      for (const t of fn1Timeouts) {
+        if (!this.pendingTimeouts.some((p) => p.key === t.key)) {
+          this.pendingTimeouts.push(t);
+        }
+      }
       return await fn2();
     }
   }
@@ -157,20 +166,22 @@ class TXImpl implements TX {
   async select<T>(...branches: SelectBranch<T>[]): Promise<T> {
     if (branches.length === 0) this.retry();
 
-    // Wrap branches: add timeout TVar logic where needed
     const fns = branches.map((b) => {
       if (typeof b === "function") return b;
       const { fn, timeout } = b;
       if (!timeout) return fn;
 
-      // Generate a stable timeout key per branch position
-      // (using a counter on the TX so it's deterministic across re-runs)
-      const timeoutKey = `__timeout:${this._timeoutCounter++}:${Date.now()}`;
+      // Stable key: txId + counter. Same across reruns of the same atomic().
+      const timeoutKey = `__timeout:${this.txId}:${this._timeoutCounter++}`;
 
       return async () => {
-        const timedOut = await this.read(timeoutKey);
-        if (timedOut) this.retry();
+        // ALWAYS record the timeout first — even if it already fired.
+        // This ensures result.timeouts is complete for the timedOut check.
         this.pendingTimeouts.push({ key: timeoutKey, ms: timeout });
+
+        const timedOut = await this.read(timeoutKey);
+        if (timedOut) this.retry(); // already fired — skip this branch
+
         return await fn();
       };
     });
@@ -181,9 +192,6 @@ class TXImpl implements TX {
       (rest, fn) => async () => await this.orElse(fn, rest),
     )();
   }
-
-  // Counter for deterministic timeout key generation
-  private _timeoutCounter = 0;
 
   // ── TMVar operations ───────────────────────────────────────────────
 
@@ -224,13 +232,16 @@ class TXImpl implements TX {
 // ── STM Client ─────────────────────────────────────────────────────────
 
 export class STM {
+  private _idCounter = 0;
   constructor(private component: ComponentApi) {}
 
   async run<T>(
     ctx: MutationCtx,
     handler: STMHandler<T>,
+    txId?: string,
   ): Promise<STMResult<T>> {
-    const tx = new TXImpl(ctx, this.component);
+    const id = txId ?? `tx:${++this._idCounter}`;
+    const tx = new TXImpl(ctx, this.component, id);
 
     let value: T;
     try {
@@ -277,9 +288,13 @@ export class STM {
     onRetry?: {
       callbackHandle: string;
       callbackArgs?: Record<string, unknown>;
+      /** Stable ID for this transaction. Must be the same across reruns.
+       *  Required for timeout keys to persist across retries. */
+      txId?: string;
     },
   ): Promise<{ committed: true; value: T } | { committed: false; timedOut: boolean }> {
-    const result = await this.run(ctx, handler);
+    const txId = onRetry?.txId ?? `tx:${++this._idCounter}`;
+    const result = await this.run(ctx, handler, txId);
 
     if (result.status === "committed") {
       return { committed: true, value: result.value };

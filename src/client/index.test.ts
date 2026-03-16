@@ -201,6 +201,94 @@ describe("STM select", () => {
   });
 });
 
+describe("STM select with timeout", () => {
+  test("timeout branch records in pendingTimeouts", async () => {
+    const t = initConvexTest();
+    // A select with a timeout branch that retries should record the timeout
+    const result = await t.run(async (ctx) => {
+      return await stm.run(ctx, async (tx) => {
+        return await tx.select(
+          { fn: async () => { tx.retry(); return "never"; }, timeout: 1000 },
+        );
+      }, "test-timeout-1");
+    });
+    expect(result.status).toBe("retry");
+    if (result.status === "retry") {
+      expect(result.timeouts.length).toBe(1);
+      expect(result.timeouts[0].ms).toBe(1000);
+      expect(result.timeouts[0].key).toContain("__timeout:test-timeout-1:");
+    }
+  });
+
+  test("stable timeout keys across reruns with same txId", async () => {
+    const t = initConvexTest();
+    const run1 = await t.run(async (ctx) => {
+      return await stm.run(ctx, async (tx) => {
+        return await tx.select(
+          { fn: async () => { tx.retry(); return "never"; }, timeout: 2000 },
+          { fn: async () => { tx.retry(); return "never"; }, timeout: 3000 },
+        );
+      }, "stable-id");
+    });
+    const run2 = await t.run(async (ctx) => {
+      return await stm.run(ctx, async (tx) => {
+        return await tx.select(
+          { fn: async () => { tx.retry(); return "never"; }, timeout: 2000 },
+          { fn: async () => { tx.retry(); return "never"; }, timeout: 3000 },
+        );
+      }, "stable-id");
+    });
+    expect(run1.status).toBe("retry");
+    expect(run2.status).toBe("retry");
+    if (run1.status === "retry" && run2.status === "retry") {
+      // Same txId → same timeout keys
+      expect(run1.timeouts[0].key).toBe(run2.timeouts[0].key);
+      expect(run1.timeouts[1].key).toBe(run2.timeouts[1].key);
+    }
+  });
+
+  test("atomic returns timedOut:true when all timeout TVars are set", async () => {
+    const t = initConvexTest();
+    // Pre-set the timeout TVars to simulate them having fired
+    await t.mutation(components.stm.lib.init, { key: "__timeout:pre-set:0", value: true });
+    await t.mutation(components.stm.lib.init, { key: "__timeout:pre-set:1", value: true });
+
+    const result = await t.run(async (ctx) => {
+      return await stm.atomic(ctx, async (tx) => {
+        return await tx.select(
+          { fn: async () => { tx.retry(); return "never"; }, timeout: 1000 },
+          { fn: async () => { tx.retry(); return "never"; }, timeout: 1000 },
+        );
+      }, { callbackHandle: "unused", txId: "pre-set" });
+    });
+
+    expect(result.committed).toBe(false);
+    if (!result.committed) {
+      expect(result.timedOut).toBe(true);
+    }
+  });
+
+  test("atomic returns timedOut:false when not all timed out", async () => {
+    const t = initConvexTest();
+    // Only set ONE timeout TVar — the other hasn't fired
+    await t.mutation(components.stm.lib.init, { key: "__timeout:partial:0", value: true });
+
+    const result = await t.run(async (ctx) => {
+      return await stm.atomic(ctx, async (tx) => {
+        return await tx.select(
+          { fn: async () => { tx.retry(); return "never"; }, timeout: 1000 },
+          { fn: async () => { tx.retry(); return "never"; }, timeout: 1000 },
+        );
+      }, { callbackHandle: "unused", txId: "partial" });
+    });
+
+    expect(result.committed).toBe(false);
+    if (!result.committed) {
+      expect(result.timedOut).toBe(false);
+    }
+  });
+});
+
 describe("STM afterCommit", () => {
   test("runs after successful commit", async () => {
     const t = initConvexTest();

@@ -141,6 +141,7 @@ async function runOrder(ctx: MutationCtx, orderId: Id<"orders">, items: string[]
     {
       callbackHandle: retryHandle,
       callbackArgs: { orderId: orderId as string, items: JSON.stringify(items) },
+      txId: `order:${orderId}:wait`,  // stable across reruns
     },
   );
   if (waitResult.committed) {
@@ -205,15 +206,20 @@ export const retryOrder = internalMutation({
     const waitResult = await stm.atomic(
       ctx,
       async (tx: TX) => awaitResults(tx, orderId, items),
-      { callbackHandle: retryHandle, callbackArgs: { orderId, items: itemsJson } },
+      {
+        callbackHandle: retryHandle,
+        callbackArgs: { orderId, items: itemsJson },
+        txId: `order:${orderId}:wait`,  // same txId as initial runOrder
+      },
     );
 
     if (waitResult.committed) {
       await ctx.db.patch(order._id, { status: "fulfilled", assignments: waitResult.value });
+      await ctx.runMutation(components.stm.lib.cleanupPrefix, { prefix: `${orderId}:` });
+    } else if (waitResult.timedOut) {
+      await ctx.db.patch(order._id, { status: "expired" });
+      await ctx.runMutation(components.stm.lib.cleanupPrefix, { prefix: `${orderId}:` });
     }
-    // If not committed: waiters registered, will re-run on next TVar change.
-    // If all timeouts fired: select retries forever → order stays submitted.
-    // The timeout expiry is handled by the initial runOrder's timeout scheduling.
   },
 });
 
