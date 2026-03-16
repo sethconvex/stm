@@ -319,7 +319,7 @@ function OrderFeed() {
                     <span className="item-attempts">
                       {itemAttempts.map((a, i) => (
                         <span key={i} className={`attempt-tag ${a.result}`}>
-                          {a.provider.slice(0, 2).toUpperCase()}
+                          {a.provider}
                           {a.result === "confirmed" ? " \u2713\u2713"
                            : a.result === "ready" ? " \u2713"
                            : a.result === "rejected" ? " \u2717"
