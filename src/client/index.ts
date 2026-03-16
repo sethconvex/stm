@@ -19,6 +19,8 @@ export interface TX {
   retry(): never;
   /** Try fn1; if it retries, discard its writes and try fn2. */
   orElse<T>(fn1: () => Promise<T>, fn2: () => Promise<T>): Promise<T>;
+  /** Try alternatives in order. First one that doesn't retry wins. */
+  select<T>(...fns: (() => Promise<T>)[]): Promise<T>;
 }
 
 export type STMHandler<T> = (tx: TX) => Promise<T>;
@@ -89,6 +91,15 @@ class TXImpl implements TX {
       // with the merged readSet covering both branches.
       return await fn2();
     }
+  }
+
+  async select<T>(...fns: (() => Promise<T>)[]): Promise<T> {
+    if (fns.length === 0) this.retry();
+    if (fns.length === 1) return await fns[0]();
+    // foldr1 orElse: try each in order, fall back on retry
+    return await fns.reduceRight(
+      (rest, fn) => async () => await this.orElse(fn, rest),
+    )();
   }
 }
 

@@ -143,7 +143,7 @@ export const buyFromEither = mutation({
 
     const result: { committed: true; value: string } | { committed: false } =
       await stm.atomic(ctx, async (tx) => {
-        return await tx.orElse(
+        return await tx.select(
           async () => { await buy(tx, a, amount); return a; },
           async () => { await buy(tx, b, amount); return b; },
         );
@@ -180,7 +180,7 @@ export const retryBuyFromEither = internalMutation({
 
     const result: { committed: true; value: string } | { committed: false } =
       await stm.atomic(ctx, async (tx) => {
-        return await tx.orElse(
+        return await tx.select(
           async () => { await buy(tx, a, amount); return a; },
           async () => { await buy(tx, b, amount); return b; },
         );
