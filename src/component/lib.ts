@@ -72,11 +72,15 @@ export const commit = mutation({
         .collect();
       for (const w of waiters) {
         // Schedule the callback (re-enqueue the blocked caller).
-        await ctx.scheduler.runAfter(
-          0,
-          w.callbackHandle as any,
-          w.callbackArgs ?? {},
-        );
+        try {
+          await ctx.scheduler.runAfter(
+            0,
+            w.callbackHandle as any,
+            w.callbackArgs ?? {},
+          );
+        } catch {
+          // Stale function handle — ignore (callback no longer exists).
+        }
         await ctx.db.delete(w._id);
       }
     }
@@ -150,6 +154,23 @@ export const init = mutation({
     if (!existing) {
       await ctx.db.insert("tvars", { key, value });
     }
+    return null;
+  },
+});
+
+// ── Clear all ──────────────────────────────────────────────────────────
+
+/**
+ * Delete all TVars and waiters. Useful for resetting state.
+ */
+export const clearAll = mutation({
+  args: {},
+  returns: v.null(),
+  handler: async (ctx) => {
+    const tvars = await ctx.db.query("tvars").collect();
+    for (const t of tvars) await ctx.db.delete(t._id);
+    const waiters = await ctx.db.query("waiters").collect();
+    for (const w of waiters) await ctx.db.delete(w._id);
     return null;
   },
 });

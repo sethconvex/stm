@@ -1,12 +1,5 @@
-import {
-  mutation,
-  query,
-  internalMutation,
-  internalAction,
-  httpAction,
-} from "./_generated/server.js";
+import { mutation, query, internalMutation, internalAction, httpAction } from "./_generated/server.js";
 import { components, internal } from "./_generated/api.js";
-import { createFunctionHandle } from "convex/server";
 import { STM } from "@convex-dev/stm";
 import { v } from "convex/values";
 import type { TX } from "@convex-dev/stm";
@@ -16,42 +9,26 @@ const stm = new STM(components.stm);
 const PROVIDERS = ["printful", "printify", "gooten"] as const;
 
 // ═══════════════════════════════════════════════════════════════════════
-//  The building block: try to fulfill an order with a specific provider
+//  The building block: try a provider for an order
 // ═══════════════════════════════════════════════════════════════════════
-// Pure STM logic. No IO. Reads provider health + order state from TVars.
-// Returns what action to take next, or retries (falls to next provider).
 
 async function tryProvider(tx: TX, orderId: string, provider: string) {
-  // Is this provider online?
   const available = await tx.read(`provider:${provider}:available`);
-  if (!available) tx.retry(); // offline — skip to next
+  if (!available) tx.retry();
 
-  // What happened last time we tried this provider for this order?
   const result = await tx.read(`order:${orderId}:${provider}`);
-
   if (result === null) {
-    // Haven't tried yet. Mark as submitted.
     tx.write(`order:${orderId}:${provider}`, "submitted");
     return { next: "submit" as const, provider };
   }
-  if (result === "submitted") {
-    // Waiting for webhook. Block until it arrives.
-    tx.retry();
-  }
-  if (result === "accepted") {
-    // This provider shipped it!
-    return { next: "done" as const, provider };
-  }
-  // "rejected" or "timeout" — fall through to next provider
-  tx.retry();
+  if (result === "submitted") tx.retry(); // waiting for response
+  if (result === "accepted") return { next: "done" as const, provider };
+  tx.retry(); // rejected — try next
 }
 
-// The full fulfillment transaction: try each provider in priority order.
 async function fulfillTransaction(tx: TX, orderId: string) {
   return await tx.select(
-    ...PROVIDERS.map(
-      (p) => async () => await tryProvider(tx, orderId, p),
-    ),
+    ...PROVIDERS.map((p) => async () => await tryProvider(tx, orderId, p)),
   );
 }
 
@@ -63,158 +40,106 @@ export const orderShirt = mutation({
   args: { design: v.string(), size: v.string() },
   handler: async (ctx, { design, size }) => {
     const orderId = await ctx.db.insert("orders", {
-      design,
-      size,
-      status: "pending",
-      attempts: [],
+      design, size, status: "pending", attempts: [],
     });
 
-    // Init per-order TVars for each provider
     for (const p of PROVIDERS) {
       await stm.init(ctx, `order:${orderId}:${p}`, null);
     }
 
-    const retryHandle: string = await createFunctionHandle(
-      internal.example.retryFulfillment,
-    );
-
-    const result: { committed: true; value: { next: string; provider: string } } | { committed: false } =
-      await stm.atomic(
-        ctx,
-        async (tx) => await fulfillTransaction(tx, orderId),
-        { callbackHandle: retryHandle, callbackArgs: { orderId } },
-      );
-
-    if (result.committed) {
-      const { next, provider } = result.value;
-      if (next === "submit") {
-        await ctx.db.patch(orderId, { status: "submitted" });
-        await ctx.scheduler.runAfter(0, internal.example.submitToProvider, {
-          orderId,
-          provider,
-        });
-      } else if (next === "done") {
-        await ctx.db.patch(orderId, { status: "fulfilled", provider });
-      }
-    }
-
+    // Run the fulfillment transaction. If it commits with "submit",
+    // schedule the action. If it retries (all blocked), do nothing —
+    // toggleProvider will re-trigger via waiter wake.
+    await runFulfillment(ctx, orderId);
     return orderId;
   },
 });
 
 // ═══════════════════════════════════════════════════════════════════════
-//  Retry callback — fired when a TVar changes (webhook result arrives)
+//  Core fulfillment logic — used by orderShirt, retryFulfillment,
+//  and handleProviderResponse
 // ═══════════════════════════════════════════════════════════════════════
 
-export const retryFulfillment = internalMutation({
-  args: { orderId: v.id("orders") },
-  handler: async (ctx, { orderId }) => {
-    const order = await ctx.db.get(orderId);
-    if (!order || order.status === "fulfilled" || order.status === "failed")
-      return;
+async function runFulfillment(ctx: any, orderId: any) {
+  const order = await ctx.db.get(orderId);
+  if (!order || order.status === "fulfilled" || order.status === "failed") return;
 
-    const retryHandle: string = await createFunctionHandle(
-      internal.example.retryFulfillment,
-    );
+  const result = await stm.atomic(
+    ctx,
+    async (tx: TX) => await fulfillTransaction(tx, orderId),
+  );
 
-    const result: { committed: true; value: { next: string; provider: string } } | { committed: false } =
-      await stm.atomic(
-        ctx,
-        async (tx) => await fulfillTransaction(tx, orderId),
-        { callbackHandle: retryHandle, callbackArgs: { orderId } },
-      );
-
-    if (result.committed) {
-      const { next, provider } = result.value;
-      if (next === "submit") {
-        await ctx.db.patch(orderId, { status: "submitted" });
-        await ctx.scheduler.runAfter(0, internal.example.submitToProvider, {
-          orderId,
-          provider,
-        });
-      } else if (next === "done") {
-        await ctx.db.patch(orderId, { status: "fulfilled", provider });
-      }
-    } else {
-      // All providers exhausted and all rejected — mark failed
-      const allRejected = await Promise.all(
-        PROVIDERS.map(async (p) => {
-          const r = await ctx.runQuery(components.stm.lib.readTVar, {
-            key: `order:${orderId}:${p}`,
-          });
-          return r === "rejected" || r === "timeout";
-        }),
-      );
-      if (allRejected.every(Boolean)) {
-        await ctx.db.patch(orderId, { status: "failed" });
+  if (result.committed) {
+    const { next, provider } = result.value;
+    if (next === "submit") {
+      await ctx.db.patch(orderId, { status: "submitted" });
+      await ctx.scheduler.runAfter(0, internal.example.submitToProvider, {
+        orderId: orderId as string,
+        provider,
+      });
+    } else if (next === "done") {
+      await ctx.db.patch(orderId, { status: "fulfilled", provider });
+    }
+  } else {
+    // Check if all providers truly rejected (not just blocked)
+    let allDone = true;
+    for (const p of PROVIDERS) {
+      const r = await ctx.runQuery(components.stm.lib.readTVar, {
+        key: `order:${orderId}:${p}`,
+      });
+      if (r !== "rejected" && r !== "timeout") {
+        allDone = false;
+        break;
       }
     }
-  },
-});
+    if (allDone) {
+      await ctx.db.patch(orderId, { status: "failed" });
+    }
+    // Otherwise: some providers are still available but blocked.
+    // The STM waiter mechanism will wake us when state changes.
+  }
+}
 
 // ═══════════════════════════════════════════════════════════════════════
-//  Submit to provider — the IO part (action with fetch)
+//  Submit to provider — calls the API, then writes result + retries
 // ═══════════════════════════════════════════════════════════════════════
 
 export const submitToProvider = internalAction({
   args: { orderId: v.string(), provider: v.string() },
   handler: async (ctx, { orderId, provider }) => {
-    // In production: fetch(`https://api.${provider}.com/orders`, { ... })
-    // For the demo: simulate with a random delay and random outcome.
-
+    // Simulate provider API call (1-3s delay, 60% acceptance)
     const delay = 1000 + Math.random() * 3000;
     await new Promise((r) => setTimeout(r, delay));
-
-    // 60% chance of acceptance
     const accepted = Math.random() < 0.6;
     const result = accepted ? "accepted" : "rejected";
 
-    // Write the result back (same as what a webhook would do)
-    await ctx.runMutation(internal.example.handleProviderResponse, {
-      orderId,
-      provider,
-      result,
+    // Write result + re-run fulfillment in one mutation
+    await ctx.runMutation(internal.example.handleAndRetry, {
+      orderId, provider, result,
     });
   },
 });
 
-// ═══════════════════════════════════════════════════════════════════════
-//  Handle provider response — writes the TVar that wakes the order
-// ═══════════════════════════════════════════════════════════════════════
-// Called by the action (simulated) OR by the webhook endpoint (real).
-
-export const handleProviderResponse = internalMutation({
-  args: {
-    orderId: v.string(),
-    provider: v.string(),
-    result: v.string(),
-  },
+// Single mutation: write the webhook result, then immediately re-run
+// fulfillment. No scheduling chain. No waiter cascade.
+export const handleAndRetry = internalMutation({
+  args: { orderId: v.string(), provider: v.string(), result: v.string() },
   handler: async (ctx, { orderId, provider, result }) => {
-    // Write the result to the order-level TVar.
-    // This wakes any waiters (if the order was blocking on retry).
+    // Write the provider's response to the TVar
     await stm.atomic(ctx, async (tx) => {
       tx.write(`order:${orderId}:${provider}`, result);
     });
 
-    // Record the attempt on the order document (for UI).
+    // Record attempt for UI
     const order = await ctx.db.get(orderId as any);
     if (order) {
       await ctx.db.patch(order._id, {
-        attempts: [
-          ...order.attempts,
-          { provider, result, at: Date.now() },
-        ],
+        attempts: [...order.attempts, { provider, result, at: Date.now() }],
       });
     }
 
-    // Always schedule a retry — the waiter might not exist if the
-    // previous transaction committed (submitted to provider) rather
-    // than retried. retryFulfillment is idempotent.
-    await ctx.scheduler.runAfter(
-      0,
-      internal.example.retryFulfillment,
-      { orderId: orderId as any },
-    );
+    // Immediately re-run fulfillment (same mutation, no scheduling)
+    await runFulfillment(ctx, orderId as any);
   },
 });
 
@@ -223,28 +148,18 @@ export const handleProviderResponse = internalMutation({
 // ═══════════════════════════════════════════════════════════════════════
 
 export const webhookHandler = httpAction(async (ctx, request) => {
-  const body = await request.json();
-  const { orderId, provider, result } = body as {
-    orderId: string;
-    provider: string;
-    result: string;
+  const body = await request.json() as {
+    orderId: string; provider: string; result: string;
   };
-
-  if (!orderId || !provider || !result) {
+  if (!body.orderId || !body.provider || !body.result) {
     return new Response("Missing fields", { status: 400 });
   }
-
-  await ctx.runMutation(internal.example.handleProviderResponse, {
-    orderId,
-    provider,
-    result,
-  });
-
+  await ctx.runMutation(internal.example.handleAndRetry, body);
   return new Response("OK", { status: 200 });
 });
 
 // ═══════════════════════════════════════════════════════════════════════
-//  Toggle provider availability
+//  Toggle provider + retry blocked orders
 // ═══════════════════════════════════════════════════════════════════════
 
 export const toggleProvider = mutation({
@@ -254,6 +169,14 @@ export const toggleProvider = mutation({
       const current = await tx.read(`provider:${provider}:available`);
       tx.write(`provider:${provider}:available`, !current);
     });
+
+    // Re-try any submitted/pending orders (provider availability changed)
+    const orders = await ctx.db.query("orders").collect();
+    for (const o of orders) {
+      if (o.status === "pending" || o.status === "submitted") {
+        await runFulfillment(ctx, o._id);
+      }
+    }
   },
 });
 
@@ -264,11 +187,12 @@ export const toggleProvider = mutation({
 export const setup = mutation({
   args: {},
   handler: async (ctx) => {
-    // All providers online
+    // Clear all STM state (TVars + stale waiters)
+    await ctx.runMutation(components.stm.lib.clearAll, {});
+    // Re-init provider availability
     await ctx.runMutation(components.stm.lib.commit, {
       writes: PROVIDERS.map((p) => ({
-        key: `provider:${p}:available`,
-        value: true,
+        key: `provider:${p}:available`, value: true,
       })),
     });
     // Clear orders
@@ -282,10 +206,9 @@ export const readProviders = query({
   handler: async (ctx) => {
     const result: Record<string, boolean> = {};
     for (const p of PROVIDERS) {
-      result[p] =
-        ((await ctx.runQuery(components.stm.lib.readTVar, {
-          key: `provider:${p}:available`,
-        })) as boolean) ?? false;
+      result[p] = ((await ctx.runQuery(components.stm.lib.readTVar, {
+        key: `provider:${p}:available`,
+      })) as boolean) ?? false;
     }
     return result;
   },
