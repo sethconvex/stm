@@ -1,5 +1,12 @@
 # Convex STM
 
+> **This is a research prototype / toy implementation** for understanding
+> how Software Transactional Memory maps onto the Convex platform. It
+> implements the core primitives from the 2005 paper and demonstrates
+> them with interactive examples, but it is not production infrastructure.
+> The real value is in the [proposed platform primitives](#proposed-platform-primitives)
+> that could make these patterns native to Convex.
+
 Operations that wait for the right conditions and complete automatically.
 When conditions change, blocked operations re-run and pick up where they
 left off. No polling. No subscriptions. No event wiring.
