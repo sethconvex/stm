@@ -170,7 +170,56 @@ npm i
 npm run dev
 ```
 
+## Proposed platform primitives
+
+This component proves that STM works on Convex, but the best version
+of these ideas would be built into the platform. Three proposed
+primitives that would make 80% of STM use cases native:
+
+### `ctx.db.waitUntil(query, predicate)`
+
+A mutation that blocks until a database condition holds. The runtime
+tracks which documents were read and re-runs the mutation when any
+change. No polling, no waiter tables, no TVars.
+
+```typescript
+const item = await ctx.db.waitUntil(
+  ctx.db.query("inventory").filter(q => q.eq(q.field("sku"), "widget")),
+  (doc) => doc.stock > 0,
+);
+await ctx.db.patch(item._id, { stock: item.stock - 1 });
+```
+
+### `ctx.scheduler.onDocumentChange(docId, fn, args)`
+
+Schedule a function to run when a specific document changes. One-shot
+trigger built into the commit path. Replaces the waiter table + wake
+mechanism.
+
+```typescript
+await ctx.scheduler.onDocumentChange(orderId, internal.checkOrder, { orderId });
+```
+
+### `reactiveMutation`
+
+A mutation that re-runs automatically when its reads change.
+`ctx.suspend()` discards writes and registers a wake trigger.
+
+```typescript
+export const fulfillOrder = reactiveMutation({
+  handler: async (ctx, { orderId }) => {
+    const allReady = await checkAllItemsReady(ctx, orderId);
+    if (!allReady) return ctx.suspend();
+    await commitOrder(ctx, orderId);
+  },
+});
+```
+
+See [model/proposed-platform-primitives.md](./model/proposed-platform-primitives.md)
+for full specs with semantics, edge cases, and implementation sketches.
+
 ## Design
 
 - [model/stm.md](./model/stm.md) — invariants, correctness proofs, paper coverage
 - [model/extensions.md](./model/extensions.md) — future directions
+- [model/proposed-platform-primitives.md](./model/proposed-platform-primitives.md) — platform-level specs
