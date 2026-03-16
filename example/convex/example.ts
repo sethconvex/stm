@@ -7,7 +7,7 @@ import type { TX } from "@convex-dev/stm";
 const stm = new STM(components.stm);
 
 // ═══════════════════════════════════════════════════════════════════════
-//  Catalog: who makes what
+//  Catalog
 // ═══════════════════════════════════════════════════════════════════════
 
 const PROVIDERS = ["printful", "printify", "gooten"] as const;
@@ -26,22 +26,11 @@ function providersFor(product: string) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-//  Domain helpers — readable operations on order state
+//  Domain helpers
 // ═══════════════════════════════════════════════════════════════════════
-//  These hide the TVar keys. Developers think in terms of
-//  "is this provider available?" not "tx.read(`provider:${p}:available`)"
 
 async function isProviderOnline(tx: TX, provider: string) {
   return (await tx.read(`provider:${provider}:available`)) === true;
-}
-
-async function getWinner(tx: TX, orderId: string, item: string) {
-  return (await tx.read(`order:${orderId}:${item}:winner`)) as string | null;
-}
-
-async function setWinner(tx: TX, orderId: string, item: string, provider: string) {
-  tx.write(`order:${orderId}:${item}:winner`, provider);
-  tx.write(`order:${orderId}:${item}:${provider}`, "accepted");
 }
 
 async function getProviderStatus(tx: TX, orderId: string, item: string, provider: string) {
@@ -52,63 +41,65 @@ function markSubmitted(tx: TX, orderId: string, item: string, provider: string) 
   tx.write(`order:${orderId}:${item}:${provider}`, "submitted");
 }
 
-function markCanceled(tx: TX, orderId: string, item: string, provider: string) {
-  tx.write(`order:${orderId}:${item}:${provider}`, "canceled");
-}
-
 // ═══════════════════════════════════════════════════════════════════════
-//  Fulfillment logic — submit all items to all providers at once
+//  Fulfillment — two-phase commit
 // ═══════════════════════════════════════════════════════════════════════
+//
+//  Phase 1: Submit to all providers. They webhook "ready" or "rejected".
+//  Phase 2: When ALL items have a "ready" provider → confirm all winners.
+//           If timeout fires first → cancel everything.
+//
+//  We don't confirm any single item until the entire cart is ready.
 
-async function fulfillCart(tx: TX, orderId: string, items: string[]) {
-  const plan: { next: "done" | "submit"; item: string; provider?: string; providers?: string[] }[] = [];
-  let allDone = true;
+type Plan =
+  | { action: "submit"; submissions: { item: string; providers: string[] }[] }
+  | { action: "confirm"; winners: { item: string; provider: string }[] }
+  | { action: "wait" };
+
+async function fulfillCart(tx: TX, orderId: string, items: string[]): Promise<Plan> {
+  const needsSubmit: { item: string; providers: string[] }[] = [];
+  const ready: { item: string; provider: string }[] = [];
+  let allReady = true;
 
   for (const item of items) {
-    const winner = await getWinner(tx, orderId, item);
-    if (winner) {
-      plan.push({ next: "done", item, provider: winner });
-      continue;
-    }
-
-    allDone = false;
+    // Find the first "ready" provider for this item
+    let readyProvider: string | null = null;
     const toSubmit: string[] = [];
 
     for (const p of providersFor(item)) {
       if (!await isProviderOnline(tx, p)) continue;
 
       const status = await getProviderStatus(tx, orderId, item, p);
-      if (!status || status === "rejected" || status === "canceled") {
+      if (status === "ready" && !readyProvider) {
+        readyProvider = p;
+      } else if (!status || status === "rejected") {
         markSubmitted(tx, orderId, item, p);
         toSubmit.push(p);
       }
     }
 
-    if (toSubmit.length > 0) {
-      plan.push({ next: "submit", item, providers: toSubmit });
+    if (readyProvider) {
+      ready.push({ item, provider: readyProvider });
+    } else {
+      allReady = false;
+      if (toSubmit.length > 0) {
+        needsSubmit.push({ item, providers: toSubmit });
+      }
     }
   }
 
-  return plan;
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-//  Confirm or cancel — atomic winner selection
-// ═══════════════════════════════════════════════════════════════════════
-//  First provider to respond "ready" wins. Everyone else gets canceled.
-//  Idempotent: same answer no matter how many times you call it.
-
-async function confirmOrCancelProvider(
-  tx: TX, orderId: string, item: string, provider: string,
-): Promise<"CONFIRM" | "CANCEL"> {
-  const winner = await getWinner(tx, orderId, item);
-  if (winner === provider) return "CONFIRM";  // you already won
-  if (winner) {
-    markCanceled(tx, orderId, item, provider);
-    return "CANCEL";                          // someone else won
+  // ALL items have a ready provider → confirm them all
+  if (allReady && ready.length === items.length) {
+    return { action: "confirm", winners: ready };
   }
-  await setWinner(tx, orderId, item, provider);
-  return "CONFIRM";                           // you're first!
+
+  // Some items need new submissions
+  if (needsSubmit.length > 0) {
+    return { action: "submit", submissions: needsSubmit };
+  }
+
+  // Everything is submitted, waiting for responses
+  return { action: "wait" };
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -122,19 +113,15 @@ export const placeOrder = mutation({
       items, status: "pending", attempts: [],
     });
 
-    // Init TVars for each item × provider + winner per item
     for (const item of items) {
-      await stm.init(ctx, `order:${orderId}:${item}:winner`, null);
       for (const p of providersFor(item)) {
         await stm.init(ctx, `order:${orderId}:${item}:${p}`, null);
       }
     }
 
-    // Optional order-level timeout: if not ALL items are fulfilled
-    // within timeoutMs, cancel the entire order. Atomic guarantee.
     if (timeoutMs) {
       await ctx.scheduler.runAfter(timeoutMs, internal.example.expireOrder, {
-        orderId: orderId as string,
+        orderId: orderId as string, items: JSON.stringify(items),
       });
     }
 
@@ -143,18 +130,8 @@ export const placeOrder = mutation({
   },
 });
 
-// If the order isn't fulfilled by the deadline, cancel everything.
-export const expireOrder = internalMutation({
-  args: { orderId: v.string() },
-  handler: async (ctx, { orderId }) => {
-    const order = await ctx.db.get(orderId as any);
-    if (!order || order.status === "fulfilled" || order.status === "expired") return; // already done
-    await ctx.db.patch(order._id, { status: "expired" as any });
-  },
-});
-
 // ═══════════════════════════════════════════════════════════════════════
-//  Run fulfillment — dispatch provider requests
+//  Run fulfillment
 // ═══════════════════════════════════════════════════════════════════════
 
 async function runFulfillment(ctx: any, orderId: any, items: string[]) {
@@ -166,103 +143,91 @@ async function runFulfillment(ctx: any, orderId: any, items: string[]) {
     async (tx: TX) => await fulfillCart(tx, orderId, items),
   );
 
-  if (result.committed) {
-    const plan = result.value;
-    const allDone = items.every((item) =>
-      plan.some((p: any) => p.item === item && p.next === "done"),
-    );
-
-    if (allDone) {
-      const assignments: Record<string, string> = {};
-      for (const p of plan) if (p.provider) assignments[p.item] = p.provider;
-      await ctx.db.patch(orderId, { status: "fulfilled", assignments });
-    } else {
-      await ctx.db.patch(orderId, { status: "submitted" });
-      for (const step of plan) {
-        if (step.next === "submit" && step.providers) {
-          for (const provider of step.providers) {
-            await ctx.scheduler.runAfter(0, internal.providerAction.submitToProvider, {
-              orderId: orderId as string,
-              items: JSON.stringify(items),
-              item: step.item,
-              provider,
-            });
-          }
-        }
-      }
-    }
-  } else {
+  if (!result.committed) {
     if (order.status === "submitted") {
       await ctx.db.patch(orderId, { status: "pending" });
     }
+    return;
   }
+
+  const plan = result.value;
+
+  if (plan.action === "confirm") {
+    // ALL items ready — confirm every winner via HTTP, then mark fulfilled
+    const assignments: Record<string, string> = {};
+    for (const w of plan.winners) assignments[w.item] = w.provider;
+    await ctx.db.patch(orderId, { status: "submitted" });
+
+    // Schedule the confirm action (does fetch to each provider)
+    await ctx.scheduler.runAfter(0, internal.providerAction.confirmAll, {
+      orderId: orderId as string,
+      items: JSON.stringify(items),
+      winners: JSON.stringify(plan.winners),
+    });
+  } else if (plan.action === "submit") {
+    await ctx.db.patch(orderId, { status: "submitted" });
+    for (const sub of plan.submissions) {
+      for (const provider of sub.providers) {
+        await ctx.scheduler.runAfter(0, internal.providerAction.submitToProvider, {
+          orderId: orderId as string,
+          items: JSON.stringify(items),
+          item: sub.item,
+          provider,
+        });
+      }
+    }
+  }
+  // "wait" → do nothing, providers are processing
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-//  Webhook handlers — called when a provider responds
+//  Webhook — provider says "ready" or "rejected"
 // ═══════════════════════════════════════════════════════════════════════
 
-export const confirmOrCancel = internalMutation({
-  args: { orderId: v.string(), items: v.string(), item: v.string(), provider: v.string() },
-  handler: async (ctx, { orderId, items: itemsJson, item, provider }) => {
-    // Atomic winner selection using component API directly
-    // (Can't use stm.atomic here because this is called from action chain)
-    const winner = await ctx.runQuery(components.stm.lib.readTVar, {
-      key: `order:${orderId}:${item}:winner`,
-    });
-
-    let decision: string;
-    if (winner === provider) {
-      decision = "CONFIRM";
-    } else if (winner) {
-      decision = "CANCEL";
-      await ctx.runMutation(components.stm.lib.commit, {
-        writes: [{ key: `order:${orderId}:${item}:${provider}`, value: "canceled" }],
-      });
-    } else {
-      decision = "CONFIRM";
-      await ctx.runMutation(components.stm.lib.commit, {
-        writes: [
-          { key: `order:${orderId}:${item}:winner`, value: provider },
-          { key: `order:${orderId}:${item}:${provider}`, value: "accepted" },
-        ],
-      });
-    }
-
-    // Record attempt
-    const order = await ctx.db.get(orderId as any);
-    if (order) {
-      await ctx.db.patch(order._id, {
-        attempts: [
-          ...order.attempts,
-          { item, provider, result: decision === "CONFIRM" ? "accepted" : "canceled", at: Date.now() },
-        ],
-      });
-    }
-
-    await ctx.scheduler.runAfter(0, internal.example.retryFulfillment, {
-      orderId, items: itemsJson,
-    });
-  },
-});
-
-export const handleResponse = internalMutation({
+export const handleWebhook = internalMutation({
   args: { orderId: v.string(), items: v.string(), item: v.string(), provider: v.string(), result: v.string() },
   handler: async (ctx, { orderId, items: itemsJson, item, provider, result }) => {
+    const order = await ctx.db.get(orderId as any);
+    if (!order || order.status === "fulfilled" || order.status === "expired") return;
+
+    // Write the provider's response to the TVar
     await ctx.runMutation(components.stm.lib.commit, {
       writes: [{ key: `order:${orderId}:${item}:${provider}`, value: result }],
     });
 
+    // Record attempt
+    await ctx.db.patch(order._id, {
+      attempts: [...order.attempts, { item, provider, result, at: Date.now() }],
+    });
+
+    // Re-run fulfillment — might now have all items ready
+    const items: string[] = JSON.parse(itemsJson);
+    await runFulfillment(ctx, orderId as any, items);
+  },
+});
+
+// Called after all winners are confirmed via HTTP
+export const markFulfilled = internalMutation({
+  args: { orderId: v.string(), winners: v.string() },
+  handler: async (ctx, { orderId, winners: winnersJson }) => {
     const order = await ctx.db.get(orderId as any);
-    if (order) {
+    if (!order || order.status === "fulfilled" || order.status === "expired") return;
+
+    const winners: { item: string; provider: string }[] = JSON.parse(winnersJson);
+    const assignments: Record<string, string> = {};
+    for (const w of winners) assignments[w.item] = w.provider;
+
+    await ctx.db.patch(order._id, { status: "fulfilled", assignments });
+
+    // Record confirmations
+    for (const w of winners) {
       await ctx.db.patch(order._id, {
-        attempts: [...order.attempts, { item, provider, result, at: Date.now() }],
+        attempts: [
+          ...(await ctx.db.get(order._id))!.attempts,
+          { item: w.item, provider: w.provider, result: "confirmed", at: Date.now() },
+        ],
       });
     }
-
-    await ctx.scheduler.runAfter(0, internal.example.retryFulfillment, {
-      orderId, items: itemsJson,
-    });
   },
 });
 
@@ -270,6 +235,40 @@ export const retryFulfillment = internalMutation({
   args: { orderId: v.string(), items: v.string() },
   handler: async (ctx, { orderId, items: itemsJson }) => {
     await runFulfillment(ctx, orderId as any, JSON.parse(itemsJson));
+  },
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+//  Order expiry — cancel everything
+// ═══════════════════════════════════════════════════════════════════════
+
+export const expireOrder = internalMutation({
+  args: { orderId: v.string(), items: v.string() },
+  handler: async (ctx, { orderId, items: itemsJson }) => {
+    const order = await ctx.db.get(orderId as any);
+    if (!order || order.status === "fulfilled") return;
+
+    await ctx.db.patch(order._id, { status: "expired" as any });
+
+    // Cancel all "ready" providers via HTTP
+    const items: string[] = JSON.parse(itemsJson);
+    const readyProviders: { item: string; provider: string }[] = [];
+    for (const item of items) {
+      for (const p of providersFor(item)) {
+        const status = await ctx.runQuery(components.stm.lib.readTVar, {
+          key: `order:${orderId}:${item}:${p}`,
+        });
+        if (status === "ready") {
+          readyProviders.push({ item, provider: p });
+        }
+      }
+    }
+
+    if (readyProviders.length > 0) {
+      await ctx.scheduler.runAfter(0, internal.providerAction.cancelAll, {
+        orderId, providers: JSON.stringify(readyProviders),
+      });
+    }
   },
 });
 
@@ -282,24 +281,18 @@ export const webhookHandler = httpAction(async (ctx, request) => {
     orderId: string; items: string; item: string; provider: string; result: string;
   };
 
-  if (body.result === "ready") {
-    await ctx.runMutation(internal.example.confirmOrCancel, {
-      orderId: body.orderId, items: body.items, item: body.item, provider: body.provider,
-    });
-  } else {
-    await ctx.runMutation(internal.example.handleResponse, {
-      orderId: body.orderId, items: body.items, item: body.item,
-      provider: body.provider, result: body.result,
-    });
-  }
+  await ctx.runMutation(internal.example.handleWebhook, {
+    orderId: body.orderId, items: body.items, item: body.item,
+    provider: body.provider, result: body.result,
+  });
 
-  return new Response(JSON.stringify({ status: "ok" }), {
+  return new Response(JSON.stringify({ status: "received" }), {
     status: 200, headers: { "Content-Type": "application/json" },
   });
 });
 
 // ═══════════════════════════════════════════════════════════════════════
-//  Provider availability (STM TVar — used for order routing)
+//  Provider availability
 // ═══════════════════════════════════════════════════════════════════════
 
 export const toggleProvider = mutation({
@@ -311,7 +304,6 @@ export const toggleProvider = mutation({
       turningOn = !current;
       tx.write(`provider:${provider}:available`, !current);
     });
-
     if (turningOn) {
       const orders = await ctx.db.query("orders").collect();
       for (const o of orders) {
@@ -320,8 +312,7 @@ export const toggleProvider = mutation({
             if (providersFor(item).includes(provider)) {
               await stm.atomic(ctx, async (tx) => {
                 const s = await getProviderStatus(tx, o._id, item, provider);
-                if (s === "rejected" || s === "canceled")
-                  tx.write(`order:${o._id}:${item}:${provider}`, null);
+                if (s === "rejected") tx.write(`order:${o._id}:${item}:${provider}`, null);
               });
             }
           }
@@ -346,8 +337,7 @@ export const setAvailable = mutation({
             if (providersFor(item).includes(provider)) {
               await stm.atomic(ctx, async (tx) => {
                 const s = await getProviderStatus(tx, o._id, item, provider);
-                if (s === "rejected" || s === "canceled")
-                  tx.write(`order:${o._id}:${item}:${provider}`, null);
+                if (s === "rejected") tx.write(`order:${o._id}:${item}:${provider}`, null);
               });
             }
           }

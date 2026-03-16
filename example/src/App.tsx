@@ -323,8 +323,10 @@ function OrderFeed() {
                           className={`attempt-dot ${a.result}`}
                           title={`${a.provider}: ${a.result}`}
                           style={{
-                            background: a.result === "accepted"
-                              ? PROVIDER_COLORS[a.provider]
+                            background:
+                              a.result === "confirmed" ? PROVIDER_COLORS[a.provider]
+                              : a.result === "ready" ? PROVIDER_COLORS[a.provider] + "88"
+                              : a.result === "accepted" ? PROVIDER_COLORS[a.provider]
                               : a.result === "canceled" ? "#555"
                               : "#ef4444",
                           }}
