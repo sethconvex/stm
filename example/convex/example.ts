@@ -13,17 +13,21 @@ const PROVIDERS = ["printful", "printify", "gooten"] as const;
 // ═══════════════════════════════════════════════════════════════════════
 
 async function tryProvider(tx: TX, orderId: string, provider: string) {
+  // Read availability — even if we don't use it, this puts it in the
+  // read set so we'll be woken when the provider toggles.
   const available = await tx.read(`provider:${provider}:available`);
   if (!available) tx.retry();
 
   const result = await tx.read(`order:${orderId}:${provider}`);
-  if (result === null) {
+  if (result === null || result === "retry") {
+    // First attempt, or retrying after provider toggle
     tx.write(`order:${orderId}:${provider}`, "submitted");
     return { next: "submit" as const, provider };
   }
-  if (result === "submitted") tx.retry(); // waiting for response
+  if (result === "submitted") tx.retry(); // waiting for webhook
   if (result === "accepted") return { next: "done" as const, provider };
-  tx.retry(); // rejected — try next
+  // "rejected" — skip to next provider
+  tx.retry();
 }
 
 async function fulfillTransaction(tx: TX, orderId: string) {
@@ -81,22 +85,13 @@ async function runFulfillment(ctx: any, orderId: any) {
       await ctx.db.patch(orderId, { status: "fulfilled", provider });
     }
   } else {
-    // Check if all providers truly rejected (not just blocked)
-    let allDone = true;
-    for (const p of PROVIDERS) {
-      const r = await ctx.runQuery(components.stm.lib.readTVar, {
-        key: `order:${orderId}:${p}`,
-      });
-      if (r !== "rejected" && r !== "timeout") {
-        allDone = false;
-        break;
-      }
+    // All providers blocked or rejected. The STM read set includes
+    // all provider availability TVars, so when ANY provider toggles,
+    // the waiter wakes and we retry. Order stays pending.
+    const order = await ctx.db.get(orderId);
+    if (order && order.status === "submitted") {
+      await ctx.db.patch(orderId, { status: "pending" });
     }
-    if (allDone) {
-      await ctx.db.patch(orderId, { status: "failed" });
-    }
-    // Otherwise: some providers are still available but blocked.
-    // The STM waiter mechanism will wake us when state changes.
   }
 }
 
@@ -165,16 +160,28 @@ export const webhookHandler = httpAction(async (ctx, request) => {
 export const toggleProvider = mutation({
   args: { provider: v.string() },
   handler: async (ctx, { provider }) => {
+    let turningOn = false;
     await stm.atomic(ctx, async (tx) => {
       const current = await tx.read(`provider:${provider}:available`);
+      turningOn = !current;
       tx.write(`provider:${provider}:available`, !current);
     });
 
-    // Re-try any submitted/pending orders (provider availability changed)
-    const orders = await ctx.db.query("orders").collect();
-    for (const o of orders) {
-      if (o.status === "pending" || o.status === "submitted") {
-        await runFulfillment(ctx, o._id);
+    // If turning a provider back on, reset rejected orders for that
+    // provider so they can retry, then re-run fulfillment.
+    if (turningOn) {
+      const orders = await ctx.db.query("orders").collect();
+      for (const o of orders) {
+        if (o.status === "pending" || o.status === "submitted") {
+          // Mark this provider as "retry" for this order
+          await stm.atomic(ctx, async (tx) => {
+            const result = await tx.read(`order:${o._id}:${provider}`);
+            if (result === "rejected") {
+              tx.write(`order:${o._id}:${provider}`, "retry");
+            }
+          });
+          await runFulfillment(ctx, o._id);
+        }
       }
     }
   },
