@@ -1,4 +1,4 @@
-import { mutation, query, internalMutation, internalAction, httpAction } from "./_generated/server.js";
+import { mutation, query, internalMutation, httpAction } from "./_generated/server.js";
 import { components, internal } from "./_generated/api.js";
 import { STM } from "@convex-dev/stm";
 import { v } from "convex/values";
@@ -126,11 +126,12 @@ async function runFulfillment(ctx: any, orderId: any, items: string[]) {
       await ctx.db.patch(orderId, { status: "fulfilled", assignments });
     } else {
       await ctx.db.patch(orderId, { status: "submitted" });
-      // Dispatch actions for ALL providers that need submitting
       for (const step of plan) {
+
         if (step.next === "submit-all") {
           for (const provider of step.providers) {
-            await ctx.scheduler.runAfter(0, internal.example.submitToProvider, {
+            console.log("scheduling submitToProvider:", step.item, provider);
+            await ctx.scheduler.runAfter(0, internal.providerAction.submitToProvider, {
               orderId: orderId as string,
               items: JSON.stringify(items),
               item: step.item,
@@ -148,41 +149,10 @@ async function runFulfillment(ctx: any, orderId: any, items: string[]) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-//  Submit to provider — simulates the API call
+//  Provider action is in providerAction.ts (separate file because
+//  actions can't share a module with component API usage)
 // ═══════════════════════════════════════════════════════════════════════
 
-export const submitToProvider = internalAction({
-  args: { orderId: v.string(), items: v.string(), item: v.string(), provider: v.string() },
-  handler: async (ctx, { orderId, items, item, provider }) => {
-    const failRate = ((await ctx.runQuery(components.stm.lib.readTVar, {
-      key: `provider:${provider}:failRate`,
-    })) as number) ?? 30;
-
-    // Simulate provider API (1-5s, we don't control this)
-    await new Promise((r) => setTimeout(r, 1000 + Math.random() * 4000));
-
-    // Check we haven't been superseded
-    const current = await ctx.runQuery(components.stm.lib.readTVar, {
-      key: `order:${orderId}:${item}:${provider}`,
-    });
-    if (current !== "submitted") return;
-
-    // Provider says "I can do this" or "nope"
-    const canFulfill = Math.random() * 100 >= failRate;
-
-    if (canFulfill) {
-      // Provider is ready — ask us to confirm (like a webhook saying "ready")
-      await ctx.runMutation(internal.example.confirmOrCancel, {
-        orderId, items, item, provider,
-      });
-    } else {
-      // Provider rejects outright
-      await ctx.runMutation(internal.example.handleResponse, {
-        orderId, items, item, provider, result: "rejected",
-      });
-    }
-  },
-});
 
 // ═══════════════════════════════════════════════════════════════════════
 //  CONFIRM or CANCEL — the atomic winner selection
@@ -195,28 +165,29 @@ export const confirmOrCancel = internalMutation({
   handler: async (ctx, { orderId, items: itemsJson, item, provider }) => {
     const items: string[] = JSON.parse(itemsJson);
 
-    let decision = "";
-
-    await stm.atomic(ctx, async (tx) => {
-      const winner = await tx.read(`order:${orderId}:${item}:winner`);
-
-      if (winner === provider) {
-        decision = "CONFIRM"; // You already won, yes again
-        return;
-      }
-      if (winner) {
-        decision = "CANCEL"; // Someone else won
-        tx.write(`order:${orderId}:${item}:${provider}`, "canceled");
-        return;
-      }
-
-      // You're first — you win!
-      decision = "CONFIRM";
-      tx.write(`order:${orderId}:${item}:winner`, provider);
-      tx.write(`order:${orderId}:${item}:${provider}`, "accepted");
+    // Atomic winner selection — using component API directly
+    const winner = await ctx.runQuery(components.stm.lib.readTVar, {
+      key: `order:${orderId}:${item}:winner`,
     });
 
-    // Record attempt
+    let decision: string;
+    if (winner === provider) {
+      decision = "CONFIRM";
+    } else if (winner) {
+      decision = "CANCEL";
+      await ctx.runMutation(components.stm.lib.commit, {
+        writes: [{ key: `order:${orderId}:${item}:${provider}`, value: "canceled" }],
+      });
+    } else {
+      decision = "CONFIRM";
+      await ctx.runMutation(components.stm.lib.commit, {
+        writes: [
+          { key: `order:${orderId}:${item}:winner`, value: provider },
+          { key: `order:${orderId}:${item}:${provider}`, value: "accepted" },
+        ],
+      });
+    }
+
     const order = await ctx.db.get(orderId as any);
     if (order) {
       await ctx.db.patch(order._id, {
@@ -227,19 +198,20 @@ export const confirmOrCancel = internalMutation({
       });
     }
 
-    // Re-run fulfillment (might complete the order now)
-    await runFulfillment(ctx, orderId as any, items);
+    // Schedule fulfillment as a top-level mutation (not called from action chain)
+    await ctx.scheduler.runAfter(0, internal.example.retryFulfillment, {
+      orderId, items: itemsJson,
+    });
   },
 });
 
-// Handle outright rejection (not a race — provider said no)
 export const handleResponse = internalMutation({
   args: { orderId: v.string(), items: v.string(), item: v.string(), provider: v.string(), result: v.string() },
   handler: async (ctx, { orderId, items: itemsJson, item, provider, result }) => {
     const items: string[] = JSON.parse(itemsJson);
 
-    await stm.atomic(ctx, async (tx) => {
-      tx.write(`order:${orderId}:${item}:${provider}`, result);
+    await ctx.runMutation(components.stm.lib.commit, {
+      writes: [{ key: `order:${orderId}:${item}:${provider}`, value: result }],
     });
 
     const order = await ctx.db.get(orderId as any);
@@ -249,6 +221,17 @@ export const handleResponse = internalMutation({
       });
     }
 
+    await ctx.scheduler.runAfter(0, internal.example.retryFulfillment, {
+      orderId, items: itemsJson,
+    });
+  },
+});
+
+// Retry fulfillment as a top-level mutation (not in action call chain)
+export const retryFulfillment = internalMutation({
+  args: { orderId: v.string(), items: v.string() },
+  handler: async (ctx, { orderId, items: itemsJson }) => {
+    const items: string[] = JSON.parse(itemsJson);
     await runFulfillment(ctx, orderId as any, items);
   },
 });
