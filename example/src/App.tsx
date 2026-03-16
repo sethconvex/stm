@@ -428,45 +428,49 @@ function QueueDemo() {
   const dequeue = useMutation(api.queue.dequeue);
   const setupQ = useMutation(api.queue.setupQueues);
 
-  const [producerRate, setProducerRate] = useState(5);  // jobs/sec
+  const [producerRate, setProducerRate] = useState(5);
   const [consumerCount, setConsumerCount] = useState(1);
   const [running, setRunning] = useState(false);
-  const producerRef = useRef(false);
-  const consumerRefs = useRef<number[]>([]);
+  const runningRef = useRef(false);
+  const timersRef = useRef<number[]>([]);
 
   const randomJob = () => JOB_NAMES[Math.floor(Math.random() * JOB_NAMES.length)];
   const randomQueue = () => ["critical", "normal", "normal", "bulk", "bulk", "bulk"][Math.floor(Math.random() * 6)];
 
+  const schedule = (fn: () => void, ms: number) => {
+    const id: number = window.setTimeout(() => {
+      timersRef.current = timersRef.current.filter((t) => t !== id);
+      fn();
+    }, ms);
+    timersRef.current.push(id);
+  };
+
   const start = () => {
     setRunning(true);
-    producerRef.current = true;
+    runningRef.current = true;
 
-    // Producer loop
     const producerTick = () => {
-      if (!producerRef.current) return;
+      if (!runningRef.current) return;
       enqueue({ queue: randomQueue(), job: randomJob() });
-      window.setTimeout(producerTick, 1000 / producerRate);
+      schedule(producerTick, 1000 / producerRate);
     };
     producerTick();
 
-    // Consumer loops
-    consumerRefs.current = [];
     for (let i = 0; i < consumerCount; i++) {
       const consumerTick = () => {
-        if (!producerRef.current) return;
+        if (!runningRef.current) return;
         dequeue({});
-        const id = window.setTimeout(consumerTick, 200 + Math.random() * 300);
-        consumerRefs.current.push(id);
+        schedule(consumerTick, 200 + Math.random() * 300);
       };
       consumerTick();
     }
   };
 
   const stop = () => {
+    runningRef.current = false;
     setRunning(false);
-    producerRef.current = false;
-    for (const id of consumerRefs.current) clearTimeout(id);
-    consumerRefs.current = [];
+    for (const id of timersRef.current) clearTimeout(id);
+    timersRef.current = [];
   };
 
   const totalQueued = (queues.critical?.length ?? 0) + (queues.normal?.length ?? 0) + (queues.bulk?.length ?? 0);
