@@ -373,48 +373,52 @@ function App() {
           <button className="reset-btn" onClick={() => setup({})}>Reset</button>
           <div className="panel code">
             <h2>The code</h2>
-            <pre>{`// ── THE BUILDING BLOCK ──────────────────────────
-// One function. Checks one provider for one item.
-// No API calls. No side effects. Just reads and writes.
+            <pre>{`// ── PHASE 1: SUBMIT ─────────────────────────────
+// One transaction submits ALL items to ALL providers.
+// Pure logic. No API calls. Commits immediately so
+// the IO phase can start.
 
-async function claimFrom(tx, orderId, item, provider) {
-  if (!await tx.read(\`provider:\${provider}:online\`))
-    tx.retry();     // offline — skip, try next
+await stm.atomic(ctx, async (tx) => {
+  for (const item of ["shirt", "mug", "poster"]) {
+    for (const p of providersFor(item)) {
+      if (!await tx.read(\`provider:\${p}:online\`)) continue;
+      tx.write(\`\${orderId}:\${item}:\${p}\`, "submitted");
+    }
+  }
+});
+// → Actions call fetch() to each provider's API.
+// → Providers process, then webhook back accepted/rejected.
+// → Webhook writes the result into the TVar.
 
-  const status = await tx.read(\`\${orderId}:\${item}:\${provider}\`);
-  if (status === "accepted") return provider;  // won!
-  if (status === "rejected") tx.retry();       // nope, next
-  tx.retry();       // still waiting for response
-}
-
-// ── COMPOSING IT ────────────────────────────────
-// select() tries each provider for an item.
-// First one accepted wins. Timeout skips slow ones.
-// The for loop makes the whole CART atomic.
+// ── PHASE 2: WAIT ───────────────────────────────
+// Second transaction waits for results. All items checked
+// in parallel — select() per item with a timeout.
 
 const result = await stm.atomic(ctx, async (tx) => {
   const winners = {};
   for (const item of ["shirt", "mug", "poster"]) {
     winners[item] = await tx.select(
       ...providersFor(item).map(p => ({
-        fn: () => claimFrom(tx, orderId, item, p),
-        timeout: 3000,   // give up after 3s
+        fn: async () => {
+          const s = await tx.read(\`\${orderId}:\${item}:\${p}\`);
+          if (s === "accepted") return p;  // this provider won
+          tx.retry();  // not yet — keep waiting
+        },
+        timeout: 3000,  // give up after 3s
       })),
     );
   }
   return winners;
 });
 
-// committed → all items sourced → ship it
+// The for loop checks items in order, but providers are
+// racing in parallel (all submitted at once in phase 1).
+// If any item isn't ready, the whole transaction retries.
+// When it re-runs, multiple items may have resolved.
+//
+// committed → every item has a winner → ship it
 // not committed → timed out → order expired
-// No partial orders. All or nothing.
-
-// ── IO HAPPENS OUTSIDE ─────────────────────────
-// 1. Action calls fetch() to provider API
-// 2. Provider webhooks back accepted/rejected
-// 3. Webhook writes the TVar
-// 4. Transaction re-runs automatically
-//    → sees "accepted" → returns the winner`}</pre>
+// No partial orders. All items or nothing.`}</pre>
           </div>
         </div>
         <div className="col-right">
