@@ -373,51 +373,40 @@ function App() {
           <button className="reset-btn" onClick={() => setup({})}>Reset</button>
           <div className="panel code">
             <h2>The code</h2>
-            <pre>{`// Customer orders shirt + mug + poster.
-// No single provider makes all three.
+            <pre>{`// Try to claim an item from a provider.
+// Pure logic — no API calls. Retries if not resolved yet.
+async function claimFrom(tx, orderId, item, provider) {
+  if (!await tx.read(\`provider:\${provider}:online\`)) tx.retry();
+  const status = await tx.read(\`\${orderId}:\${item}:\${provider}\`);
+  if (status === "accepted") return provider;
+  if (status === "rejected") tx.retry();  // try next provider
+  tx.write(\`\${orderId}:\${item}:\${provider}\`, "submitted");
+  tx.retry();  // wait for webhook response
+}
 
-export const placeOrder = mutation(async (ctx, { items }) => {
-
-  // Set a deadline — cancel everything if not done in 3s
-  ctx.scheduler.runAfter(3000, expireOrder, { orderId });
-
-  // STM transaction: submit to every capable provider at once.
-  // This is pure logic — no API calls, no side effects.
-  const plan = await stm.atomic(ctx, async (tx) => {
-    for (const item of items) {
-      for (const provider of providersFor(item)) {
-        if (!await tx.read(\`provider:\${provider}:online\`))
-          continue;  // skip offline providers
-        tx.write(\`\${orderId}:\${item}:\${provider}\`, "submitted");
-      }
-    }
-  });
-
-  // NOW do the IO: call each provider's API
-  for (const { item, provider } of plan.toSubmit) {
-    ctx.scheduler.runAfter(0, submitToProvider, { item, provider });
+// Fill the cart. Each item races its providers with a timeout.
+// select() tries each provider — first to accept wins.
+// Timeout means "give up on this provider, try the next."
+// All composable — select composes with retry composes with timeout.
+const result = await stm.atomic(ctx, async (tx) => {
+  const assignments = {};
+  for (const item of ["shirt", "mug", "poster"]) {
+    assignments[item] = await tx.select(
+      ...providersFor(item).map(p => ({
+        fn: async () => claimFrom(tx, orderId, item, p),
+        timeout: 3000,  // 3s per provider
+      })),
+    );
   }
+  return assignments;
 });
+// If committed: all items sourced. Ship it.
+// If not: all providers timed out. Order expired.
 
-// The action does a single fetch — that's the only IO
-const submitToProvider = action(async (ctx, { item, provider }) => {
-  await fetch(\`https://api.\${provider}.com/order\`, {
-    body: JSON.stringify({ item, callbackUrl: WEBHOOK_URL })
-  });
-});
-
-// Provider calls our webhook when done
-http.route("/webhook", async (ctx, req) => {
-  const { orderId, item, provider, result } = await req.json();
-
-  // Write the result into the TVar
-  tx.write(\`\${orderId}:\${item}:\${provider}\`, result);
-
-  // Re-run the STM transaction — if all items now have
-  // an accepted provider, the order is fulfilled.
-  // If not, keep waiting for the other providers.
-  // If the 3s deadline fires first, everything is canceled.
-});`}</pre>
+// IO happens outside the transaction:
+// → action calls fetch() to each provider
+// → provider webhooks back accepted/rejected
+// → webhook writes the TVar → re-runs the transaction`}</pre>
           </div>
         </div>
         <div className="col-right">

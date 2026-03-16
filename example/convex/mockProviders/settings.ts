@@ -1,4 +1,4 @@
-import { mutation, query, internalQuery } from "../_generated/server.js";
+import { mutation, query, internalQuery, internalMutation } from "../_generated/server.js";
 import { v } from "convex/values";
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -50,7 +50,7 @@ export const set = mutation({
   },
 });
 
-export const initAll = mutation({
+export const initAll = internalMutation({
   args: {},
   handler: async (ctx) => {
     const existing = await ctx.db.query("providerSettings").collect();

@@ -24,43 +24,14 @@ function providersFor(product: string) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-//  Step 1: STM transaction — pick providers, no IO
+//  STM building blocks
 // ═══════════════════════════════════════════════════════════════════════
 
-// Try to claim an item from a provider. Pure logic, no side effects.
-async function claimFrom(tx: TX, orderId: string, item: string, provider: string) {
-  // Is this provider online?
-  const online = await tx.read(`provider:${provider}:online`);
-  if (!online) tx.retry();
-
-  // Have we already tried this provider for this item?
-  const status = await tx.read(`${orderId}:${item}:${provider}`);
-  if (status === "submitted") tx.retry();  // waiting for response
-  if (status === "accepted") return provider;  // already won
-  if (status === "rejected") tx.retry();  // failed, try next
-
-  // Not tried yet — mark as submitted
-  tx.write(`${orderId}:${item}:${provider}`, "submitted");
-  return provider;
-}
-
-// For each item in the cart, race all capable providers.
-// Returns the list of items that need provider API calls.
-async function fillOrder(tx: TX, orderId: string, items: string[]) {
+// Phase 1: Submit to all providers. Commits so actions can be dispatched.
+async function submitAll(tx: TX, orderId: string, items: string[]) {
   const toSubmit: { item: string; provider: string }[] = [];
-  let allDone = true;
 
   for (const item of items) {
-    // Check if any provider already accepted this item
-    let found = false;
-    for (const p of providersFor(item)) {
-      const status = await tx.read(`${orderId}:${item}:${p}`);
-      if (status === "accepted") { found = true; break; }
-    }
-    if (found) continue;
-
-    allDone = false;
-    // Submit to all available providers at once
     for (const p of providersFor(item)) {
       const online = await tx.read(`provider:${p}:online`);
       if (!online) continue;
@@ -72,35 +43,106 @@ async function fillOrder(tx: TX, orderId: string, items: string[]) {
     }
   }
 
-  return { done: allDone, toSubmit };
+  return toSubmit;
+}
+
+// Phase 2: Wait for results using select() with timeout.
+// Each item picks from its providers — first accepted wins.
+// If all time out → select retries → transaction fails → order expired.
+async function awaitResults(tx: TX, orderId: string, items: string[], timeoutMs?: number) {
+  const assignments: Record<string, string> = {};
+
+  for (const item of items) {
+    const winner = await tx.select(
+      ...providersFor(item).map((p) => {
+        const fn = async () => {
+          const status = await tx.read(`${orderId}:${item}:${p}`);
+          if (status === "accepted") return p;
+          tx.retry(); // not yet — wait
+        };
+        return timeoutMs ? { fn, timeout: timeoutMs } : fn;
+      }),
+    );
+    assignments[item] = winner;
+  }
+
+  return assignments;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-//  Step 2: Action — call provider API (IO)
-//  (in providerAction.ts — actions can't share module with components)
+//  Place an order
 // ═══════════════════════════════════════════════════════════════════════
 
+export const placeOrder = mutation({
+  args: { items: v.array(v.string()), timeoutMs: v.optional(v.number()) },
+  handler: async (ctx, { items, timeoutMs }) => {
+    const orderId = await ctx.db.insert("orders", {
+      items, status: "pending", attempts: [],
+    });
+
+    for (const item of items) {
+      for (const p of providersFor(item)) {
+        await stm.init(ctx, `${orderId}:${item}:${p}`, null);
+      }
+    }
+
+    await runOrder(ctx, orderId, items, timeoutMs);
+    return orderId;
+  },
+});
+
 // ═══════════════════════════════════════════════════════════════════════
-//  Step 3: Webhook — provider responds, STM records it
+//  Run order — the STM + IO loop
+// ═══════════════════════════════════════════════════════════════════════
+
+async function runOrder(ctx: any, orderId: any, items: string[], timeoutMs?: number) {
+  const order = await ctx.db.get(orderId);
+  if (!order || order.status === "fulfilled" || order.status === "expired") return;
+
+  // Phase 1: Submit to all providers (always commits)
+  const submitResult = await stm.atomic(ctx, async (tx: TX) => submitAll(tx, orderId, items));
+  if (submitResult.committed && submitResult.value.length > 0) {
+    await ctx.db.patch(orderId, { status: "submitted" });
+    for (const { item, provider } of submitResult.value) {
+      await ctx.scheduler.runAfter(0, internal.providerAction.submitToProvider, {
+        orderId: orderId as string,
+        items: JSON.stringify(items),
+        item,
+        provider,
+      });
+    }
+  }
+
+  // Phase 2: Check if all items have a winner (select with timeout)
+  const waitResult = await stm.atomic(ctx, async (tx: TX) => awaitResults(tx, orderId, items, timeoutMs));
+
+  if (waitResult.committed) {
+    await ctx.db.patch(orderId, { status: "fulfilled", assignments: waitResult.value });
+  } else if (timeoutMs) {
+    await ctx.db.patch(orderId, { status: "expired" as any });
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  Webhook — provider responds
 // ═══════════════════════════════════════════════════════════════════════
 
 export const handleWebhook = internalMutation({
   args: { orderId: v.string(), items: v.string(), item: v.string(), provider: v.string(), result: v.string() },
   handler: async (ctx, { orderId, items: itemsJson, item, provider, result }) => {
     const order = await ctx.db.get(orderId as any);
-    if (!order || order.status === "fulfilled" || order.status === "expired") return;
+    if (!order) return;
+    if ("status" in order && (order.status === "fulfilled" || order.status === "expired")) return;
 
-    // Record the provider's response (writes the TVar)
     await ctx.runMutation(components.stm.lib.commit, {
       writes: [{ key: `${orderId}:${item}:${provider}`, value: result }],
     });
 
-    // Log the attempt for the UI
+    const attempts = "attempts" in order ? (order as any).attempts : [];
     await ctx.db.patch(order._id, {
-      attempts: [...order.attempts, { item, provider, result, at: Date.now() }],
-    });
+      attempts: [...attempts, { item, provider, result, at: Date.now() }],
+    } as any);
 
-    // Re-run the order — maybe it's complete now
     await runOrder(ctx, orderId as any, JSON.parse(itemsJson));
   },
 });
@@ -113,70 +155,6 @@ export const webhookHandler = httpAction(async (ctx, request) => {
   return new Response("OK", { status: 200 });
 });
 
-// ═══════════════════════════════════════════════════════════════════════
-//  Order lifecycle
-// ═══════════════════════════════════════════════════════════════════════
-
-export const placeOrder = mutation({
-  args: { items: v.array(v.string()), timeoutMs: v.optional(v.number()) },
-  handler: async (ctx, { items, timeoutMs }) => {
-    const orderId = await ctx.db.insert("orders", {
-      items, status: "pending", attempts: [],
-    });
-
-    // Init per-item-per-provider TVars
-    for (const item of items) {
-      for (const p of providersFor(item)) {
-        await stm.init(ctx, `${orderId}:${item}:${p}`, null);
-      }
-    }
-
-    if (timeoutMs) {
-      await ctx.scheduler.runAfter(timeoutMs, internal.example.expireOrder, {
-        orderId: orderId as string,
-      });
-    }
-
-    await runOrder(ctx, orderId, items);
-    return orderId;
-  },
-});
-
-async function runOrder(ctx: any, orderId: any, items: string[]) {
-  const order = await ctx.db.get(orderId);
-  if (!order || order.status === "fulfilled" || order.status === "expired") return;
-
-  const result = await stm.atomic(ctx, async (tx: TX) => fillOrder(tx, orderId, items));
-  if (!result.committed) return;
-
-  const { done, toSubmit } = result.value;
-
-  if (done) {
-    // All items have an accepted provider — order complete
-    const assignments: Record<string, string> = {};
-    for (const item of items) {
-      for (const p of providersFor(item)) {
-        const status = await ctx.runQuery(components.stm.lib.readTVar, {
-          key: `${orderId}:${item}:${p}`,
-        });
-        if (status === "accepted") { assignments[item] = p; break; }
-      }
-    }
-    await ctx.db.patch(orderId, { status: "fulfilled", assignments });
-  } else {
-    await ctx.db.patch(orderId, { status: "submitted" });
-    // Step 2: call provider APIs (IO happens here, not in the transaction)
-    for (const { item, provider } of toSubmit) {
-      await ctx.scheduler.runAfter(0, internal.providerAction.submitToProvider, {
-        orderId: orderId as string,
-        items: JSON.stringify(items),
-        item,
-        provider,
-      });
-    }
-  }
-}
-
 export const retryOrder = internalMutation({
   args: { orderId: v.string(), items: v.string() },
   handler: async (ctx, { orderId, items }) => {
@@ -184,17 +162,8 @@ export const retryOrder = internalMutation({
   },
 });
 
-export const expireOrder = internalMutation({
-  args: { orderId: v.string() },
-  handler: async (ctx, { orderId }) => {
-    const order = await ctx.db.get(orderId as any);
-    if (!order || order.status === "fulfilled") return;
-    await ctx.db.patch(order._id, { status: "expired" as any });
-  },
-});
-
 // ═══════════════════════════════════════════════════════════════════════
-//  Provider on/off (TVar — STM uses this for routing)
+//  Provider on/off
 // ═══════════════════════════════════════════════════════════════════════
 
 export const toggleProvider = mutation({
@@ -209,9 +178,8 @@ export const toggleProvider = mutation({
     if (turningOn) {
       const orders = await ctx.db.query("orders").collect();
       for (const o of orders) {
-        if (o.status === "pending" || o.status === "submitted") {
+        if (o.status === "pending" || o.status === "submitted")
           await runOrder(ctx, o._id, o.items);
-        }
       }
     }
   },
@@ -226,9 +194,8 @@ export const setAvailable = mutation({
     if (available) {
       const orders = await ctx.db.query("orders").collect();
       for (const o of orders) {
-        if (o.status === "pending" || o.status === "submitted") {
+        if (o.status === "pending" || o.status === "submitted")
           await runOrder(ctx, o._id, o.items);
-        }
       }
     }
   },
