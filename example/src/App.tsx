@@ -373,7 +373,7 @@ function App() {
           <button className="reset-btn" onClick={() => setup({})}>Reset</button>
           <div className="panel code">
             <h2>The code</h2>
-            <pre>{`// Step 1: STM transaction — pick providers (no IO)
+            <pre>{`// 1. STM transaction — pick providers (pure, no IO)
 await stm.atomic(ctx, async (tx) => {
   for (const item of ["shirt", "mug", "poster"]) {
     for (const p of providersFor(item)) {
@@ -385,17 +385,19 @@ await stm.atomic(ctx, async (tx) => {
   }
 });
 
-// Step 2: IO — call each provider's API
+// 2. IO — call each provider's API (action with fetch)
 await fetch(\`\${provider}/order\`, { body: { orderId, item } });
-// Provider processes... then webhooks back accepted/rejected.
+// Provider processes... webhooks back accepted/rejected.
 
-// Step 3: Webhook writes the result back into a TVar
-await ctx.runMutation(components.stm.lib.commit, {
-  writes: [{ key: \`\${orderId}:\${item}:\${provider}\`, value: "accepted" }]
-});
-// → Re-runs the STM transaction. First provider to accept wins.
-// → If all items have a winner, order is fulfilled.
-// → If not, keep waiting. Timeout cancels the whole order.`}</pre>
+// 3. Webhook writes the result → re-runs the transaction
+tx.write(\`\${orderId}:\${item}:\${provider}\`, "accepted");
+// First provider to accept each item wins.
+// All items must succeed or the order keeps waiting.
+
+// 4. Timeout — cancel the whole order if it takes too long
+await ctx.scheduler.runAfter(3000, expireOrder, { orderId });
+// If not all items fulfilled in 3s → status = "expired".
+// No partial fulfillment. All or nothing.`}</pre>
           </div>
         </div>
         <div className="col-right">
