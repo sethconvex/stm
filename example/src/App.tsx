@@ -671,20 +671,24 @@ function App() {
       ) : (
         <>
           <div className="explainer">
-            <h2>Priority Queue</h2>
-            <p>Three queues with different priorities. Workers always take from the highest-priority non-empty queue first.</p>
+            <h2>Priority Queue with TVars</h2>
+            <p>Each queue is a <strong>TVar</strong> — a transactional variable holding an array. Producers push, consumers shift. The STM transaction coordinates everything.</p>
             <div className="primitive-cards">
               <div className="prim-card">
+                <strong>TVar</strong>
+                <span>Each queue is a TVar holding <code>string[]</code>. Reads and writes are transactional — no race conditions between concurrent producers and consumers.</span>
+              </div>
+              <div className="prim-card">
                 <strong>retry</strong>
-                <span><code>queueShift()</code> reads the queue. If empty, calls <code>retry()</code> — blocks until a producer adds something. No polling loop.</span>
+                <span><code>queueShift()</code> reads the TVar. If the array is empty, <code>retry()</code> blocks until a producer pushes something. No polling.</span>
               </div>
               <div className="prim-card">
                 <strong>select</strong>
-                <span><code>select(critical, normal, bulk)</code> tries each queue in order. First non-empty wins. If all empty, blocks on all three.</span>
+                <span><code>select(critical, normal, bulk)</code> tries each queue TVar in priority order. First non-empty wins. All empty? Blocks on all three TVars at once.</span>
               </div>
               <div className="prim-card">
                 <strong>atomic</strong>
-                <span>The dequeue is atomic — only one consumer gets each job, even with 10 consumers running. No double-processing.</span>
+                <span>Each dequeue is one atomic transaction — only one consumer gets each job, even with 10 running concurrently. No double-processing.</span>
               </div>
             </div>
           </div>
