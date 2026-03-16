@@ -3,6 +3,8 @@ import { components, internal } from "./_generated/api.js";
 import { STM } from "@convex-dev/stm";
 import { v } from "convex/values";
 import type { TX } from "@convex-dev/stm";
+import type { Id } from "./_generated/dataModel.js";
+import type { MutationCtx } from "./_generated/server.js";
 
 const stm = new STM(components.stm);
 
@@ -28,8 +30,7 @@ function providersFor(product: string) {
 // ═══════════════════════════════════════════════════════════════════════
 
 // Phase 1: Submit to all providers.
-// Uses afterCommit to schedule the fetch() calls — they only fire
-// if the transaction commits. No manual two-phase dispatch needed.
+// afterCommit schedules the fetch() calls — they only fire on commit.
 async function submitAll(tx: TX, orderId: string, items: string[]) {
   let submitted = false;
 
@@ -42,13 +43,9 @@ async function submitAll(tx: TX, orderId: string, items: string[]) {
         tx.write(`${orderId}:${item}:${p}`, "submitted");
         submitted = true;
 
-        // Schedule the IO — only runs if this transaction commits
         tx.afterCommit(async (ctx) => {
           await ctx.scheduler.runAfter(0, internal.providerAction.submitToProvider, {
-            orderId: orderId as string,
-            items: JSON.stringify(items),
-            item,
-            provider: p,
+            orderId, items: JSON.stringify(items), item, provider: p,
           });
         });
       }
@@ -60,7 +57,6 @@ async function submitAll(tx: TX, orderId: string, items: string[]) {
 
 // Phase 2: Wait for results using select() with timeout.
 // Each item picks from its providers — first accepted wins.
-// If all time out → select retries → transaction fails → order expired.
 async function awaitResults(tx: TX, orderId: string, items: string[], timeoutMs?: number) {
   const assignments: Record<string, string> = {};
 
@@ -70,7 +66,7 @@ async function awaitResults(tx: TX, orderId: string, items: string[], timeoutMs?
         const fn = async () => {
           const status = await tx.read(`${orderId}:${item}:${p}`);
           if (status === "accepted") return p;
-          tx.retry(); // not yet — wait
+          tx.retry();
         };
         return timeoutMs ? { fn, timeout: timeoutMs } : fn;
       }),
@@ -107,12 +103,11 @@ export const placeOrder = mutation({
 //  Run order — the STM + IO loop
 // ═══════════════════════════════════════════════════════════════════════
 
-async function runOrder(ctx: any, orderId: any, items: string[], timeoutMs?: number) {
+async function runOrder(ctx: MutationCtx, orderId: Id<"orders">, items: string[], timeoutMs?: number) {
   const order = await ctx.db.get(orderId);
   if (!order || order.status === "fulfilled" || order.status === "expired") return;
 
-  // Phase 1: Submit to all providers
-  // afterCommit handles the IO dispatch — no manual loop needed
+  // Phase 1: Submit to all providers (afterCommit dispatches IO)
   const submitResult = await stm.atomic(ctx, async (tx: TX) => submitAll(tx, orderId, items));
   if (submitResult.committed && submitResult.value) {
     await ctx.db.patch(orderId, { status: "submitted" });
@@ -123,7 +118,7 @@ async function runOrder(ctx: any, orderId: any, items: string[], timeoutMs?: num
   if (waitResult.committed) {
     await ctx.db.patch(orderId, { status: "fulfilled", assignments: waitResult.value });
   } else if (timeoutMs) {
-    await ctx.db.patch(orderId, { status: "expired" as any });
+    await ctx.db.patch(orderId, { status: "expired" });
   }
 }
 
@@ -134,20 +129,22 @@ async function runOrder(ctx: any, orderId: any, items: string[], timeoutMs?: num
 export const handleWebhook = internalMutation({
   args: { orderId: v.string(), items: v.string(), item: v.string(), provider: v.string(), result: v.string() },
   handler: async (ctx, { orderId, items: itemsJson, item, provider, result }) => {
-    const order = await ctx.db.get(orderId as any);
-    if (!order) return;
-    if ("status" in order && (order.status === "fulfilled" || order.status === "expired")) return;
+    const order = await ctx.db.get(orderId as Id<"orders">);
+    if (!order || order.status === "fulfilled" || order.status === "expired") return;
 
+    // Write the provider's response to the TVar
     await ctx.runMutation(components.stm.lib.commit, {
       writes: [{ key: `${orderId}:${item}:${provider}`, value: result }],
     });
 
-    const attempts = "attempts" in order ? (order as any).attempts : [];
+    // Log the attempt
     await ctx.db.patch(order._id, {
-      attempts: [...attempts, { item, provider, result, at: Date.now() }],
-    } as any);
+      attempts: [...order.attempts, { item, provider, result, at: Date.now() }],
+    });
 
-    await runOrder(ctx, orderId as any, JSON.parse(itemsJson));
+    // Re-run — might be complete now
+    const items: string[] = JSON.parse(itemsJson);
+    await runOrder(ctx, order._id, items);
   },
 });
 
@@ -162,7 +159,7 @@ export const webhookHandler = httpAction(async (ctx, request) => {
 export const retryOrder = internalMutation({
   args: { orderId: v.string(), items: v.string() },
   handler: async (ctx, { orderId, items }) => {
-    await runOrder(ctx, orderId as any, JSON.parse(items));
+    await runOrder(ctx, orderId as Id<"orders">, JSON.parse(items));
   },
 });
 

@@ -322,15 +322,13 @@ function OrderFeed() {
                           key={i}
                           className={`attempt-tag ${a.result}`}
                           title={
-                            a.result === "confirmed" ? `${a.provider}: confirmed — printing`
-                            : a.result === "ready" ? `${a.provider}: ready — holding, waiting for other items`
-                            : a.result === "rejected" ? `${a.provider}: rejected this item`
+                            a.result === "accepted" ? `${a.provider}: accepted`
+                            : a.result === "rejected" ? `${a.provider}: rejected`
                             : `${a.provider}: ${a.result}`
                           }
                         >
                           {a.provider}
-                          {a.result === "confirmed" ? " \u2713\u2713"
-                           : a.result === "ready" ? " \u2713"
+                          {a.result === "accepted" ? " \u2713"
                            : a.result === "rejected" ? " \u2717"
                            : ""}
                         </span>
