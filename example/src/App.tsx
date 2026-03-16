@@ -161,9 +161,9 @@ function ProviderCard({ name, info, onToggle, onSetRate, onSetTimeout }: {
 
   // Local slider state for instant feedback
   const [localRate, setLocalRate] = useState(info.failRate);
-  const [localTimeout, setLocalTimeout] = useState(info.timeout);
+  const [localMaxDelay, setLocalMaxDelay] = useState(info.maxDelay);
   useEffect(() => { setLocalRate(info.failRate); }, [info.failRate]);
-  useEffect(() => { setLocalTimeout(info.timeout); }, [info.timeout]);
+  useEffect(() => { setLocalMaxDelay(info.maxDelay); }, [info.maxDelay]);
 
   const debouncedSetRate = useDebouncedCallback(onSetRate, 300);
   const debouncedSetTimeout = useDebouncedCallback(onSetTimeout, 300);
@@ -208,10 +208,10 @@ function ProviderCard({ name, info, onToggle, onSetRate, onSetTimeout }: {
           </div>
           <div className="slider-row">
             <span className="slider-label">Max wait</span>
-            <input type="range" min={500} max={10000} step={500} value={localTimeout}
-              onChange={(e) => { const v = Number(e.target.value); setLocalTimeout(v); debouncedSetTimeout(v); }}
+            <input type="range" min={500} max={10000} step={500} value={localMaxDelay}
+              onChange={(e) => { const v = Number(e.target.value); setLocalMaxDelay(v); debouncedSetTimeout(v); }}
               style={{ accentColor: PROVIDER_COLORS[name] }} />
-            <span className="slider-value">{(localTimeout / 1000).toFixed(1)}s</span>
+            <span className="slider-value">{(localMaxDelay / 1000).toFixed(1)}s</span>
           </div>
         </div>
       )}
@@ -227,8 +227,7 @@ function ProviderCard({ name, info, onToggle, onSetRate, onSetTimeout }: {
 function ProviderStatus() {
   const providers = useQuery(api.example.readProviders) ?? {};
   const toggle = useMutation(api.example.toggleProvider);
-  const setRate = useMutation(api.example.setFailRate);
-  const setTO = useMutation(api.example.setTimeout);
+  const setSettings = useMutation(api.mockProviders.settings.set);
 
   return (
     <div className="providers">
@@ -238,8 +237,8 @@ function ProviderStatus() {
           name={name}
           info={info as any}
           onToggle={() => toggle({ provider: name })}
-          onSetRate={(rate) => setRate({ provider: name, rate })}
-          onSetTimeout={(timeout) => setTO({ provider: name, timeout })}
+          onSetRate={(rate) => setSettings({ provider: name, failRate: rate })}
+          onSetTimeout={(maxDelay) => setSettings({ provider: name, maxDelay })}
         />
       ))}
     </div>
@@ -338,9 +337,8 @@ function OrderFeed() {
 function App() {
   const setup = useMutation(api.example.setup);
   const placeOrder = useMutation(api.example.placeOrder);
-  const setRate = useMutation(api.example.setFailRate);
-  const setTO = useMutation(api.example.setTimeout);
   const setAvail = useMutation(api.example.setAvailable);
+  const setSettings = useMutation(api.mockProviders.settings.set);
 
   return (
     <div className="app">
@@ -349,8 +347,8 @@ function App() {
 
       <Walkthrough
         onOrder={(items) => placeOrder({ items })}
-        onSetRate={(p, r) => setRate({ provider: p, rate: r })}
-        onSetTimeout={(p, t) => setTO({ provider: p, timeout: t })}
+        onSetRate={(p, r) => setSettings({ provider: p, failRate: r })}
+        onSetTimeout={(p, t) => setSettings({ provider: p, maxDelay: t })}
         onSetAvailable={(p, a) => setAvail({ provider: p, available: a })}
       />
 

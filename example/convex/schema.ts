@@ -9,7 +9,6 @@ export default defineSchema({
       v.literal("submitted"),
       v.literal("fulfilled"),
     ),
-    // Which provider is fulfilling each item: { "shirt": "printful", "mug": "gooten" }
     assignments: v.optional(v.any()),
     attempts: v.array(
       v.object({
@@ -20,4 +19,13 @@ export default defineSchema({
       }),
     ),
   }),
+
+  // Mock provider settings — NOT TVars. These belong to the "external"
+  // providers, not to the STM system. In production these would be in
+  // the provider's own database.
+  providerSettings: defineTable({
+    provider: v.string(),
+    failRate: v.number(),   // 0-100
+    maxDelay: v.number(),   // ms — max response time
+  }).index("by_provider", ["provider"]),
 });

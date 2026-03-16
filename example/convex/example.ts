@@ -123,16 +123,11 @@ async function runFulfillment(ctx: any, orderId: any, items: string[]) {
 
         if (step.next === "submit-all") {
           for (const provider of step.providers!) {
-            // Read provider settings so the action can pass them to the mock
-            const failRate = ((await ctx.runQuery(components.stm.lib.readTVar, {
-              key: `provider:${provider}:failRate`,
-            })) as number) ?? 30;
             await ctx.scheduler.runAfter(0, internal.providerAction.submitToProvider, {
               orderId: orderId as string,
               items: JSON.stringify(items),
               item: step.item,
               provider,
-              failRate,
             });
           }
         }
@@ -305,23 +300,7 @@ export const toggleProvider = mutation({
   },
 });
 
-export const setFailRate = mutation({
-  args: { provider: v.string(), rate: v.number() },
-  handler: async (ctx, { provider, rate }) => {
-    await stm.atomic(ctx, async (tx) => {
-      tx.write(`provider:${provider}:failRate`, rate);
-    });
-  },
-});
-
-export const setTimeout = mutation({
-  args: { provider: v.string(), timeout: v.number() },
-  handler: async (ctx, { provider, timeout }) => {
-    await stm.atomic(ctx, async (tx) => {
-      tx.write(`provider:${provider}:timeout`, timeout);
-    });
-  },
-});
+// setFailRate and maxDelay are in mockProviders/settings.ts (not TVars)
 
 export const setAvailable = mutation({
   args: { provider: v.string(), available: v.boolean() },
@@ -357,14 +336,15 @@ export const setAvailable = mutation({
 export const setup = mutation({
   args: {},
   handler: async (ctx) => {
+    // Clear STM state (TVars + waiters)
     await ctx.runMutation(components.stm.lib.clearAll, {});
+    // Init provider availability TVars (these ARE STM — order routing depends on them)
     await ctx.runMutation(components.stm.lib.commit, {
-      writes: [
-        ...PROVIDERS.map((p) => ({ key: `provider:${p}:available`, value: true })),
-        ...PROVIDERS.map((p) => ({ key: `provider:${p}:failRate`, value: 30 })),
-        ...PROVIDERS.map((p) => ({ key: `provider:${p}:timeout`, value: 5000 })),
-      ],
+      writes: PROVIDERS.map((p) => ({ key: `provider:${p}:available`, value: true })),
     });
+    // Init mock provider settings (plain DB, not TVars)
+    await ctx.runMutation(internal.mockProviders.settings.initAll, {});
+    // Clear orders
     const orders = await ctx.db.query("orders").collect();
     for (const o of orders) await ctx.db.delete(o._id);
   },
@@ -373,13 +353,20 @@ export const setup = mutation({
 export const readProviders = query({
   args: {},
   handler: async (ctx) => {
-    const result: Record<string, { available: boolean; products: string[]; failRate: number; timeout: number }> = {};
+    // Availability is a TVar (STM uses it for routing)
+    // Settings are plain DB rows (mock provider config)
+    const allSettings = await ctx.db.query("providerSettings").collect();
+    const settingsMap: Record<string, { failRate: number; maxDelay: number }> = {};
+    for (const s of allSettings) settingsMap[s.provider] = { failRate: s.failRate, maxDelay: s.maxDelay };
+
+    const result: Record<string, { available: boolean; products: string[]; failRate: number; maxDelay: number }> = {};
     for (const p of PROVIDERS) {
+      const s = settingsMap[p] ?? { failRate: 30, maxDelay: 5000 };
       result[p] = {
         available: ((await ctx.runQuery(components.stm.lib.readTVar, { key: `provider:${p}:available` })) as boolean) ?? false,
         products: CATALOG[p],
-        failRate: ((await ctx.runQuery(components.stm.lib.readTVar, { key: `provider:${p}:failRate` })) as number) ?? 30,
-        timeout: ((await ctx.runQuery(components.stm.lib.readTVar, { key: `provider:${p}:timeout` })) as number) ?? 5000,
+        failRate: s.failRate,
+        maxDelay: s.maxDelay,
       };
     }
     return result;
