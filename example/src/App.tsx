@@ -57,7 +57,7 @@ const STEPS = [
   },
   {
     title: "Atomic composition \u2014 all or nothing",
-    body: "Shirt + mug + poster. No single provider makes all three. The transaction sources each item independently, but the whole cart is atomic \u2014 if the poster can't be sourced, the shirt and mug don't ship either.",
+    body: "All providers back to 0% failure. Shirt + mug + poster \u2014 no single provider makes all three. The transaction sources each item independently, but the whole cart is atomic. If one item can't be sourced, nothing ships.",
     action: { type: "order" as const, items: ["shirt", "mug", "poster"] },
     setup: ALL_ON,
   },
