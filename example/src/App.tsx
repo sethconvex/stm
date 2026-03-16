@@ -1,7 +1,7 @@
 import "./App.css";
 import { useMutation, useQuery } from "convex/react";
 import { api } from "../convex/_generated/api";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 
 const PRODUCTS = [
   { key: "shirt", emoji: "\uD83D\uDC55" },
@@ -107,6 +107,7 @@ function Walkthrough({
   onSetAvailable: (provider: string, available: boolean) => void;
 }) {
   const [step, setStep] = useState(0);
+  const [applied, setApplied] = useState(false);
   const current = STEPS[step];
 
   const applySetup = (s: (typeof STEPS)[number]) => {
@@ -117,6 +118,14 @@ function Walkthrough({
       onSetTimeout(p, cfg.timeout);
     }
   };
+
+  // Apply setup on mount for step 0
+  useEffect(() => {
+    if (!applied) {
+      applySetup(STEPS[0]);
+      setApplied(true);
+    }
+  }, [applied]);
 
   const goTo = (i: number) => {
     applySetup(STEPS[i]);
