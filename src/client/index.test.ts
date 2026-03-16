@@ -1,48 +1,92 @@
 import { describe, expect, test } from "vitest";
 import { components, initConvexTest } from "./setup.test.js";
 
-describe("STM client tests", () => {
-  test("should commit TVar writes atomically", async () => {
+describe("STM component CRUD", () => {
+  test("init and read TVar", async () => {
     const t = initConvexTest();
+    await t.mutation(components.stm.lib.init, { key: "x", value: 42 });
+    const val = await t.query(components.stm.lib.readTVar, { key: "x" });
+    expect(val).toBe(42);
+  });
 
-    // Init TVars
-    await t.mutation(components.stm.lib.init, {
-      key: "a",
-      value: 100,
-    });
-    await t.mutation(components.stm.lib.init, {
-      key: "b",
-      value: 0,
-    });
+  test("read uninitialized returns null", async () => {
+    const t = initConvexTest();
+    const val = await t.query(components.stm.lib.readTVar, { key: "nope" });
+    expect(val).toBeNull();
+  });
 
-    // Commit a transfer
+  test("init does not overwrite", async () => {
+    const t = initConvexTest();
+    await t.mutation(components.stm.lib.init, { key: "x", value: 1 });
+    await t.mutation(components.stm.lib.init, { key: "x", value: 99 });
+    expect(await t.query(components.stm.lib.readTVar, { key: "x" })).toBe(1);
+  });
+
+  test("commit writes atomically", async () => {
+    const t = initConvexTest();
+    await t.mutation(components.stm.lib.init, { key: "a", value: 10 });
+    await t.mutation(components.stm.lib.init, { key: "b", value: 20 });
     await t.mutation(components.stm.lib.commit, {
       writes: [
         { key: "a", value: 50 },
         { key: "b", value: 50 },
       ],
     });
-
-    // Verify
-    const a = await t.query(components.stm.lib.readTVar, { key: "a" });
-    const b = await t.query(components.stm.lib.readTVar, { key: "b" });
-    expect(a).toBe(50);
-    expect(b).toBe(50);
+    expect(await t.query(components.stm.lib.readTVar, { key: "a" })).toBe(50);
+    expect(await t.query(components.stm.lib.readTVar, { key: "b" })).toBe(50);
   });
 
-  test("should read null for uninitialized TVar", async () => {
+  test("readTVars returns multiple values", async () => {
     const t = initConvexTest();
-    const val = await t.query(components.stm.lib.readTVar, {
-      key: "nonexistent",
+    await t.mutation(components.stm.lib.init, { key: "a", value: 1 });
+    await t.mutation(components.stm.lib.init, { key: "b", value: 2 });
+    const result = await t.query(components.stm.lib.readTVars, {
+      keys: ["a", "b", "missing"],
     });
-    expect(val).toBeNull();
+    expect(result).toEqual({ a: 1, b: 2, missing: null });
+  });
+});
+
+describe("STM block", () => {
+  test("returns true when values match", async () => {
+    const t = initConvexTest();
+    await t.mutation(components.stm.lib.init, { key: "x", value: 1 });
+    const safe = await t.mutation(components.stm.lib.block, {
+      reads: [{ key: "x", expectedValue: 1 }],
+      callbackHandle: "fake",
+    });
+    expect(safe).toBe(true);
   });
 
-  test("init should not overwrite existing value", async () => {
+  test("returns false when value changed", async () => {
     const t = initConvexTest();
-    await t.mutation(components.stm.lib.init, { key: "x", value: 42 });
-    await t.mutation(components.stm.lib.init, { key: "x", value: 99 });
-    const val = await t.query(components.stm.lib.readTVar, { key: "x" });
-    expect(val).toBe(42);
+    await t.mutation(components.stm.lib.init, { key: "x", value: 1 });
+    const safe = await t.mutation(components.stm.lib.block, {
+      reads: [{ key: "x", expectedValue: 999 }],
+      callbackHandle: "fake",
+    });
+    expect(safe).toBe(false);
+  });
+});
+
+describe("STM clearAll", () => {
+  test("removes all tvars and waiters", async () => {
+    const t = initConvexTest();
+    await t.mutation(components.stm.lib.init, { key: "a", value: 1 });
+    await t.mutation(components.stm.lib.init, { key: "b", value: 2 });
+    await t.mutation(components.stm.lib.clearAll, {});
+    expect(await t.query(components.stm.lib.readTVar, { key: "a" })).toBeNull();
+    expect(await t.query(components.stm.lib.readTVar, { key: "b" })).toBeNull();
+  });
+});
+
+describe("STM cleanupKeys", () => {
+  test("deletes specified tvars", async () => {
+    const t = initConvexTest();
+    await t.mutation(components.stm.lib.init, { key: "keep", value: 1 });
+    await t.mutation(components.stm.lib.init, { key: "delete-me", value: 2 });
+    await t.mutation(components.stm.lib.cleanupKeys, { keys: ["delete-me"] });
+    expect(await t.query(components.stm.lib.readTVar, { key: "keep" })).toBe(1);
+    expect(await t.query(components.stm.lib.readTVar, { key: "delete-me" })).toBeNull();
   });
 });
