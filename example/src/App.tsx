@@ -613,7 +613,32 @@ function App() {
 
       {tab === "fulfillment" ? (
         <>
-          <p className="subtitle">Race providers, first to accept wins</p>
+          <div className="explainer">
+            <h2>Multi-Provider Fulfillment</h2>
+            <p>Order shirts, mugs, and posters from multiple print providers. No single provider makes everything.</p>
+            <div className="primitive-cards">
+              <div className="prim-card">
+                <strong>retry</strong>
+                <span>Each provider call waits for a webhook response. <code>retry()</code> suspends the transaction until the response TVar changes. No polling.</span>
+              </div>
+              <div className="prim-card">
+                <strong>select</strong>
+                <span>Multiple providers race per item. <code>select()</code> tries each — first to accept wins. Rejected providers are skipped automatically.</span>
+              </div>
+              <div className="prim-card">
+                <strong>atomic</strong>
+                <span>The whole cart is one transaction. If the poster can't be sourced, the shirt and mug don't ship either. All or nothing.</span>
+              </div>
+              <div className="prim-card">
+                <strong>afterCommit</strong>
+                <span>Provider API calls (fetch) are scheduled via <code>afterCommit()</code> — they only fire if the transaction commits. No wasted calls on retry.</span>
+              </div>
+              <div className="prim-card">
+                <strong>timeout</strong>
+                <span>Each <code>select()</code> branch can have a deadline. If a provider is too slow, it's skipped. If all time out, the order expires.</span>
+              </div>
+            </div>
+          </div>
           <Walkthrough
             onOrder={(items, timeoutMs) => placeOrder({ items, timeoutMs })}
             onSetRate={(p, r) => setSettings({ provider: p, failRate: r })}
@@ -635,7 +660,24 @@ function App() {
         </>
       ) : (
         <>
-          <p className="subtitle">select() from priority queues — highest non-empty wins</p>
+          <div className="explainer">
+            <h2>Priority Queue</h2>
+            <p>Three queues with different priorities. Workers always take from the highest-priority non-empty queue first.</p>
+            <div className="primitive-cards">
+              <div className="prim-card">
+                <strong>retry</strong>
+                <span><code>queueShift()</code> reads the queue. If empty, calls <code>retry()</code> — blocks until a producer adds something. No polling loop.</span>
+              </div>
+              <div className="prim-card">
+                <strong>select</strong>
+                <span><code>select(critical, normal, bulk)</code> tries each queue in order. First non-empty wins. If all empty, blocks on all three.</span>
+              </div>
+              <div className="prim-card">
+                <strong>atomic</strong>
+                <span>The dequeue is atomic — only one consumer gets each job, even with 10 consumers running. No double-processing.</span>
+              </div>
+            </div>
+          </div>
           <QueueDemo />
         </>
       )}
