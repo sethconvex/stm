@@ -358,31 +358,35 @@ function App() {
           <button className="reset-btn" onClick={() => setup({})}>Reset</button>
           <div className="panel code">
             <h2>The code</h2>
-            <pre>{`// Race ALL providers per item. First to accept wins.
-await stm.atomic(ctx, async (tx) => {
-  for (const item of cart) {
-    const winner = await tx.read(\`order:\${id}:\${item}:winner\`);
-    if (winner) continue;  // already have a winner
+            <pre>{`// Readable helpers hide the plumbing
+async function isProviderOnline(tx, provider) { ... }
+async function getWinner(tx, orderId, item) { ... }
+async function setWinner(tx, orderId, item, provider) { ... }
+async function getProviderStatus(tx, orderId, item, provider) { ... }
 
-    // Submit to every available provider at once
+// Fulfill a cart — submit all items to all providers at once
+await stm.atomic(ctx, async (tx) => {
+  for (const item of order.items) {
+    if (await getWinner(tx, orderId, item)) continue;
+
     for (const p of providersFor(item)) {
-      if (!await tx.read(\`provider:\${p}:available\`)) continue;
-      if (await tx.read(\`order:\${id}:\${item}:\${p}\`) === null)
-        tx.write(\`order:\${id}:\${item}:\${p}\`, "submitted");
+      if (!await isProviderOnline(tx, p)) continue;
+      if (!await getProviderStatus(tx, orderId, item, p))
+        markSubmitted(tx, orderId, item, p);
     }
-    tx.retry();  // wait for first response
   }
 });
+// Each provider gets a fetch() call → processes → webhooks back.
 
-// Provider webhook: atomically pick a winner
-await stm.atomic(ctx, async (tx) => {
-  const winner = await tx.read(\`order:\${id}:\${item}:winner\`);
-  if (winner === provider) return "CONFIRM";
-  if (winner)              return "CANCEL";
-  tx.write(\`order:\${id}:\${item}:winner\`, provider);
-  return "CONFIRM";  // you're first!
-});
-// Idempotent. Call it 10 times, same answer.`}</pre>
+// Provider says "I'm ready" — atomically pick a winner
+async function confirmOrCancel(tx, orderId, item, provider) {
+  const winner = await getWinner(tx, orderId, item);
+  if (winner === provider) return "CONFIRM";  // you already won
+  if (winner) return "CANCEL";                // too late
+  await setWinner(tx, orderId, item, provider);
+  return "CONFIRM";                           // you're first!
+}
+// Idempotent. Call it 10 times, same answer every time.`}</pre>
           </div>
         </div>
         <div className="col-right">
