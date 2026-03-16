@@ -145,26 +145,48 @@ async function runFulfillment(ctx: any, orderId: any, items: string[]) {
 export const submitToProvider = internalAction({
   args: {
     orderId: v.string(),
-    items: v.string(), // JSON stringified items array
+    items: v.string(),
     item: v.string(),
     provider: v.string(),
   },
   handler: async (ctx, { orderId, items, item, provider }) => {
-    // Read this provider's failure rate
+    // Read provider settings
     const failRate = ((await ctx.runQuery(components.stm.lib.readTVar, {
       key: `provider:${provider}:failRate`,
     })) as number) ?? 30;
+    const timeout = ((await ctx.runQuery(components.stm.lib.readTVar, {
+      key: `provider:${provider}:timeout`,
+    })) as number) ?? 5000;
 
-    // Simulate provider API (1-2s delay)
-    await new Promise((r) => setTimeout(r, 800 + Math.random() * 1200));
+    // Schedule a timeout — if provider doesn't respond in time, write "timeout"
+    await ctx.scheduler.runAfter(timeout, internal.example.handleTimeout, {
+      orderId, items, item, provider,
+    });
+
+    // Simulate provider API — random delay up to 2x the timeout
+    const responseTime = Math.random() * timeout * 2;
+    await new Promise((r) => setTimeout(r, responseTime));
+
+    // Provider responds (if we haven't timed out yet)
     const result = Math.random() * 100 >= failRate ? "accepted" : "rejected";
+    await ctx.runMutation(internal.example.handleAndRetry, {
+      orderId, items, item, provider, result,
+    });
+  },
+});
+
+// Timeout handler — fires if provider takes too long
+export const handleTimeout = internalMutation({
+  args: { orderId: v.string(), items: v.string(), item: v.string(), provider: v.string() },
+  handler: async (ctx, { orderId, items, item, provider }) => {
+    // Only write timeout if still in "submitted" state (not already responded)
+    const current = await ctx.runQuery(components.stm.lib.readTVar, {
+      key: `order:${orderId}:${item}:${provider}`,
+    });
+    if (current !== "submitted") return; // Already got a response, ignore
 
     await ctx.runMutation(internal.example.handleAndRetry, {
-      orderId,
-      items,
-      item,
-      provider,
-      result,
+      orderId, items, item, provider, result: "timeout",
     });
   },
 });
@@ -257,6 +279,15 @@ export const setFailRate = mutation({
   },
 });
 
+export const setTimeout = mutation({
+  args: { provider: v.string(), timeout: v.number() },
+  handler: async (ctx, { provider, timeout }) => {
+    await stm.atomic(ctx, async (tx) => {
+      tx.write(`provider:${provider}:timeout`, timeout);
+    });
+  },
+});
+
 export const setup = mutation({
   args: {},
   handler: async (ctx) => {
@@ -265,6 +296,7 @@ export const setup = mutation({
       writes: [
         ...PROVIDERS.map((p) => ({ key: `provider:${p}:available`, value: true })),
         ...PROVIDERS.map((p) => ({ key: `provider:${p}:failRate`, value: 30 })),
+        ...PROVIDERS.map((p) => ({ key: `provider:${p}:timeout`, value: 5000 })),
       ],
     });
     const orders = await ctx.db.query("orders").collect();
@@ -275,7 +307,7 @@ export const setup = mutation({
 export const readProviders = query({
   args: {},
   handler: async (ctx) => {
-    const result: Record<string, { available: boolean; products: string[]; failRate: number }> = {};
+    const result: Record<string, { available: boolean; products: string[]; failRate: number; timeout: number }> = {};
     for (const p of PROVIDERS) {
       result[p] = {
         available: ((await ctx.runQuery(components.stm.lib.readTVar, {
@@ -285,6 +317,9 @@ export const readProviders = query({
         failRate: ((await ctx.runQuery(components.stm.lib.readTVar, {
           key: `provider:${p}:failRate`,
         })) as number) ?? 30,
+        timeout: ((await ctx.runQuery(components.stm.lib.readTVar, {
+          key: `provider:${p}:timeout`,
+        })) as number) ?? 5000,
       };
     }
     return result;

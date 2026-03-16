@@ -33,12 +33,11 @@ h1 { text-align: center; font-size: 1.8rem; margin-bottom: 0.25rem; }
 .provider-card.online .provider-status { color: #22c55e; }
 .provider-card.offline .provider-status { color: #ef4444; }
 
-.fail-rate {
-  display: flex; align-items: center; gap: 0.4rem;
-  padding: 0.3rem 0.5rem 0.5rem; border-top: 1px solid #1a1a24;
-}
-.slider { flex: 1; height: 4px; cursor: pointer; }
-.fail-label { font-size: 0.65rem; color: #888; white-space: nowrap; min-width: 50px; text-align: right; }
+.sliders { padding: 0.3rem 0.5rem 0.5rem; border-top: 1px solid #1a1a24; }
+.slider-row { display: flex; align-items: center; gap: 0.3rem; margin-bottom: 0.15rem; }
+.slider-row input { flex: 1; height: 4px; cursor: pointer; }
+.slider-label { font-size: 0.6rem; color: #555; width: 38px; text-transform: uppercase; letter-spacing: 0.03em; }
+.slider-value { font-size: 0.65rem; color: #888; min-width: 32px; text-align: right; font-variant-numeric: tabular-nums; }
 
 /* ── Panels ────────────────────────────────────────── */
 .panel { background: #111118; border: 1px solid #222; border-radius: 10px; padding: 1rem; margin-bottom: 0.75rem; }
