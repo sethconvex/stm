@@ -16,7 +16,7 @@ h1 { text-align: center; font-size: 1.8rem; margin-bottom: 0.25rem; }
 /* ── Providers ─────────────────────────────────────── */
 .providers { display: flex; gap: 0.6rem; margin-bottom: 0.75rem; }
 .provider-card {
-  flex: 1; display: flex; flex-direction: column; gap: 0.2rem;
+  width: 160px; flex-shrink: 0; display: flex; flex-direction: column; gap: 0.2rem;
   background: #111118; border: 2px solid #333; border-radius: 10px;
   overflow: hidden; transition: all 0.2s;
 }
@@ -33,11 +33,12 @@ h1 { text-align: center; font-size: 1.8rem; margin-bottom: 0.25rem; }
 .provider-card.online .provider-status { color: #22c55e; }
 .provider-card.offline .provider-status { color: #ef4444; }
 
-.sliders { padding: 0.3rem 0.5rem 0.5rem; border-top: 1px solid #1a1a24; }
-.slider-row { display: flex; align-items: center; gap: 0.3rem; margin-bottom: 0.15rem; }
-.slider-row input { flex: 1; height: 4px; cursor: pointer; }
-.slider-label { font-size: 0.55rem; color: #555; width: 48px; text-transform: uppercase; letter-spacing: 0.03em; }
-.slider-value { font-size: 0.65rem; color: #888; min-width: 32px; text-align: right; font-variant-numeric: tabular-nums; }
+.sliders { padding: 0.4rem 0.6rem 0.5rem; border-top: 1px solid #1a1a24; }
+.slider-group { margin-bottom: 0.3rem; }
+.slider-header { display: flex; justify-content: space-between; margin-bottom: 0.1rem; }
+.slider-label { font-size: 0.6rem; color: #555; text-transform: uppercase; letter-spacing: 0.03em; }
+.slider-value { font-size: 0.6rem; color: #888; font-variant-numeric: tabular-nums; }
+.slider-group input { width: 100%; height: 4px; cursor: pointer; }
 
 /* ── Panels ────────────────────────────────────────── */
 .panel { background: #111118; border: 1px solid #222; border-radius: 10px; padding: 1rem; margin-bottom: 0.75rem; }

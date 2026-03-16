@@ -96,5 +96,8 @@
     "vitest": "4.1.0"
   },
   "types": "./dist/client/index.d.ts",
-  "module": "./dist/client/index.js"
+  "module": "./dist/client/index.js",
+  "dependencies": {
+    "@convex-dev/static-hosting": "^0.1.3"
+  }
 }

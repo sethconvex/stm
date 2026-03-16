@@ -23,6 +23,12 @@ const PROVIDER_COLORS: Record<string, string> = {
   gooten: "#9333ea",
 };
 
+const PROVIDER_NAMES: Record<string, string> = {
+  printful: "ThreadCraft",
+  printify: "InkDrop",
+  gooten: "PixelPress",
+};
+
 type ProviderCfg = { online: boolean; rate: number; maxDelay: number };
 type SetupCfg = Record<string, ProviderCfg>;
 
@@ -188,7 +194,7 @@ function ProviderCard({ name, info, onToggle, onSetRate, onSetMaxDelay }: {
     <div className={`provider-card ${info.online ? "online" : "offline"}`} style={{ borderColor: info.online ? PROVIDER_COLORS[name] : "#333" }}>
       <div className="provider-top" onClick={onToggle}>
         <span className="provider-dot" style={{ background: info.online ? PROVIDER_COLORS[name] : "#555" }} />
-        <span className="provider-name">{name}</span>
+        <span className="provider-name">{PROVIDER_NAMES[name] ?? name}</span>
         <span className="provider-products">
           {info.products.map((pr) => PRODUCTS.find((x) => x.key === pr)?.emoji).join(" ")}
         </span>
@@ -196,19 +202,23 @@ function ProviderCard({ name, info, onToggle, onSetRate, onSetMaxDelay }: {
       </div>
       {info.online && (
         <div className="sliders">
-          <div className="slider-row">
-            <span className="slider-label">Fail</span>
+          <div className="slider-group">
+            <div className="slider-header">
+              <span className="slider-label">Fail rate</span>
+              <span className="slider-value">{localRate}%</span>
+            </div>
             <input type="range" min={0} max={100} value={localRate}
               onChange={(e) => { const v = Number(e.target.value); setLocalRate(v); debouncedSetRate(v); }}
               style={{ accentColor: PROVIDER_COLORS[name] }} />
-            <span className="slider-value">{localRate}%</span>
           </div>
-          <div className="slider-row">
-            <span className="slider-label">Max wait</span>
+          <div className="slider-group">
+            <div className="slider-header">
+              <span className="slider-label">Max wait</span>
+              <span className="slider-value">{(localMaxDelay / 1000).toFixed(1)}s</span>
+            </div>
             <input type="range" min={500} max={10000} step={500} value={localMaxDelay}
               onChange={(e) => { const v = Number(e.target.value); setLocalMaxDelay(v); debouncedSetMaxDelay(v); }}
               style={{ accentColor: PROVIDER_COLORS[name] }} />
-            <span className="slider-value">{(localMaxDelay / 1000).toFixed(1)}s</span>
           </div>
         </div>
       )}
@@ -303,7 +313,7 @@ function OrderFeed() {
                     <span className="item-name">{item}</span>
                     {winner ? (
                       <span className="item-winner" style={{ color: PROVIDER_COLORS[winner] }}>
-                        {winner}
+                        {PROVIDER_NAMES[winner] ?? winner}
                       </span>
                     ) : (
                       <span className="item-waiting">waiting...</span>
@@ -314,12 +324,12 @@ function OrderFeed() {
                           key={i}
                           className={`attempt-tag ${a.result}`}
                           title={
-                            a.result === "accepted" ? `${a.provider}: accepted`
-                            : a.result === "rejected" ? `${a.provider}: rejected`
-                            : `${a.provider}: ${a.result}`
+                            a.result === "accepted" ? `${PROVIDER_NAMES[a.provider] ?? a.provider}: accepted`
+                            : a.result === "rejected" ? `${PROVIDER_NAMES[a.provider] ?? a.provider}: rejected`
+                            : `${PROVIDER_NAMES[a.provider] ?? a.provider}: ${a.result}`
                           }
                         >
-                          {a.provider}
+                          {PROVIDER_NAMES[a.provider] ?? a.provider}
                           {a.result === "accepted" ? " \u2713"
                            : a.result === "rejected" ? " \u2717"
                            : ""}

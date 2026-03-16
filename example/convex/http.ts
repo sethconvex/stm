@@ -1,4 +1,6 @@
 import { httpRouter } from "convex/server";
+import { registerStaticRoutes } from "@convex-dev/static-hosting";
+import { components } from "./_generated/api";
 import { webhookHandler } from "./example.js";
 import { printfulOrder, printifyOrder, gootenOrder } from "./mockProviders/handlers.js";
 
@@ -11,5 +13,8 @@ http.route({ path: "/webhook/provider", method: "POST", handler: webhookHandler 
 http.route({ path: "/mock/printful/order", method: "POST", handler: printfulOrder });
 http.route({ path: "/mock/printify/order", method: "POST", handler: printifyOrder });
 http.route({ path: "/mock/gooten/order", method: "POST", handler: gootenOrder });
+
+// Static hosting — serves the built frontend
+registerStaticRoutes(http, components.selfHosting);
 
 export default http;

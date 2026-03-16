@@ -14,6 +14,7 @@ import type * as mockProviders_handlers from "../mockProviders/handlers.js";
 import type * as mockProviders_settings from "../mockProviders/settings.js";
 import type * as providerAction from "../providerAction.js";
 import type * as queue from "../queue.js";
+import type * as staticHosting from "../staticHosting.js";
 
 import type {
   ApiFromModules,
@@ -28,6 +29,7 @@ declare const fullApi: ApiFromModules<{
   "mockProviders/settings": typeof mockProviders_settings;
   providerAction: typeof providerAction;
   queue: typeof queue;
+  staticHosting: typeof staticHosting;
 }>;
 
 /**
@@ -58,4 +60,5 @@ export declare const internal: FilterApi<
 
 export declare const components: {
   stm: import("@convex-dev/stm/_generated/component.js").ComponentApi<"stm">;
+  selfHosting: import("@convex-dev/static-hosting/_generated/component.js").ComponentApi<"selfHosting">;
 };
