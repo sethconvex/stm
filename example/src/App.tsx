@@ -351,52 +351,112 @@ function OrderFeed() {
 
 declare const Prism: { highlightAll: () => void } | undefined;
 
-const CODE = `// ── PHASE 1: SUBMIT ─────────────────────────────
-// One transaction submits ALL items to ALL providers.
-// afterCommit schedules IO — only fires on commit.
+const CODE = `// ── CATALOG ─────────────────────────────────────
+// Each provider makes different products.
+// No single provider makes everything.
+const CATALOG = {
+  threadcraft: ["shirt", "mug"],
+  inkdrop:     ["shirt", "poster"],
+  pixelpress:  ["mug", "poster"],
+};
+
+// ── PHASE 1: SUBMIT ALL ────────────────────────
+// One atomic transaction submits every item to
+// every capable provider simultaneously.
+// No IO here — just reads and writes to TVars.
 
 await stm.atomic(ctx, async (tx) => {
-  for (const item of ["shirt", "mug", "poster"]) {
-    for (const p of providersFor(item)) {
-      if (!await tx.read(\`provider:\${p}:online\`)) continue;
-      tx.write(\`\${orderId}:\${item}:\${p}\`, "submitted");
+  for (const item of order.items) {
+    for (const provider of providersFor(item)) {
 
+      // Read a TVar: is this provider online?
+      const online = await tx.read(
+        \`provider:\${provider}:online\`
+      );
+      if (!online) continue; // skip offline
+
+      // Write a TVar: mark "submitted"
+      tx.write(
+        \`\${orderId}:\${item}:\${provider}\`,
+        "submitted"
+      );
+
+      // afterCommit: schedule the fetch() call.
+      // Only fires if the transaction commits.
+      // Discarded on retry — no wasted API calls.
       tx.afterCommit(async (ctx) => {
-        await ctx.scheduler.runAfter(0, submitToProvider, {
-          item, provider: p
-        });
+        await ctx.scheduler.runAfter(
+          0, submitToProvider,
+          { orderId, item, provider }
+        );
       });
     }
   }
 });
-// → Actions call fetch() to each provider
-// → Providers webhook back accepted/rejected
-// → Webhook writes the TVar
 
-// ── PHASE 2: WAIT ───────────────────────────────
-// select() per item with timeout. All items checked
-// each re-run — providers race in parallel.
+// ── IO (outside the transaction) ───────────────
+// Each action calls fetch() to a provider's API.
+// The provider processes and webhooks us back.
+
+const submitToProvider = action(async (ctx, args) => {
+  await fetch(\`https://api.\${args.provider}.com/order\`, {
+    method: "POST",
+    body: JSON.stringify({
+      item: args.item,
+      callbackUrl: WEBHOOK_URL,
+    }),
+  });
+});
+
+// ── WEBHOOK ────────────────────────────────────
+// Provider calls our webhook with the result.
+// We write it to a TVar — this wakes the
+// waiting transaction automatically.
+
+http.route("/webhook/provider", async (ctx, req) => {
+  const { orderId, item, provider, result } = await req.json();
+  // One TVar write → wakes the blocked transaction
+  await stm.atomic(ctx, async (tx) => {
+    tx.write(\`\${orderId}:\${item}:\${provider}\`, result);
+  });
+});
+
+// ── PHASE 2: WAIT FOR RESULTS ──────────────────
+// Second transaction checks each item.
+// select() tries providers in order per item.
+// timeout: give up on slow providers.
+// If ANY item has no winner, the whole transaction
+// retries — re-runs when a TVar changes.
 
 const result = await stm.atomic(ctx, async (tx) => {
   const winners = {};
-  for (const item of ["shirt", "mug", "poster"]) {
+
+  for (const item of order.items) {
+    // select: try each provider for this item
     winners[item] = await tx.select(
-      ...providersFor(item).map(p => ({
+      ...providersFor(item).map(provider => ({
         fn: async () => {
-          const s = await tx.read(\`\${orderId}:\${item}:\${p}\`);
-          if (s === "accepted") return p;
-          tx.retry();
+          // Read the TVar: did this provider respond?
+          const status = await tx.read(
+            \`\${orderId}:\${item}:\${provider}\`
+          );
+          if (status === "accepted") return provider;
+          tx.retry(); // not yet — wait
         },
-        timeout: 3000,
+        timeout: 3000, // skip after 3s
       })),
     );
   }
   return winners;
+}, {
+  // Re-run when any watched TVar changes
+  callbackHandle: retryFn,
+  txId: \`order:\${orderId}\`, // stable across retries
 });
 
-// committed → every item has a winner → ship it
-// not committed → timed out → order expired
-// No partial orders. All items or nothing.`;
+// committed  → every item has a winner → ship it
+// timedOut   → deadline passed → order expired
+// All items or nothing. No partial fulfillment.`;
 
 function CodeBlock() {
   const ref = useRef<HTMLElement>(null);
@@ -566,9 +626,32 @@ function QueueDemo() {
 
       <div className="panel code">
         <h2>The code</h2>
-        <pre><code className="language-typescript">{`// Worker takes from highest-priority non-empty queue.
-// select() tries each — first one with items wins.
+        <pre><code className="language-typescript">{`// ── TVars as queues ─────────────────────────────
+// Each queue is a TVar holding string[].
+// Producers push, consumers shift. All transactional.
+
+async function queuePush(tx, queue, job) {
+  const items = await tx.read(\`queue:\${queue}\`) ?? [];
+  tx.write(\`queue:\${queue}\`, [...items, job]);
+}
+
+async function queueShift(tx, queue) {
+  const items = await tx.read(\`queue:\${queue}\`) ?? [];
+  if (items.length === 0) tx.retry(); // ← blocks!
+  tx.write(\`queue:\${queue}\`, items.slice(1));
+  return items[0];
+}
+
+// ── Producer: push to any queue ─────────────────
+await stm.atomic(ctx, async (tx) => {
+  await queuePush(tx, "critical", "deploy-prod");
+});
+
+// ── Consumer: priority select ───────────────────
+// Tries critical first. If empty, normal. Then bulk.
 // If ALL empty, blocks until any queue gets a job.
+// Multiple consumers can run this simultaneously —
+// each dequeue is atomic, no double-processing.
 
 await stm.atomic(ctx, async (tx) => {
   return await tx.select(
@@ -587,13 +670,16 @@ await stm.atomic(ctx, async (tx) => {
   );
 });
 
-// queueShift: take the first item, or retry if empty
-async function queueShift(tx, queue) {
-  const items = await tx.read(\`queue:\${queue}\`);
-  if (items.length === 0) tx.retry();
-  tx.write(\`queue:\${queue}\`, items.slice(1));
-  return items[0];
-}`}</code></pre>
+// How it works:
+// 1. select tries queueShift("critical")
+// 2. queueShift reads the TVar → empty → retry()
+// 3. select catches the retry, tries "normal"
+// 4. queueShift reads → has items → returns first
+// 5. Transaction commits: item removed atomically
+//
+// If all queues empty: retry() propagates up.
+// The transaction suspends until ANY queue TVar
+// changes — then re-runs from the top.`}</code></pre>
       </div>
     </div>
   );
