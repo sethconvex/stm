@@ -93,4 +93,51 @@ describe("Order lifecycle", () => {
     );
     expect(accepted).toBeDefined();
   });
+
+  test("timed order expires when no provider accepts", async () => {
+    const t = initConvexTest();
+    await t.mutation(api.example.setup, {});
+
+    // Set all providers to 100% failure
+    await t.mutation(api.mockProviders.settings.set, { provider: "printful", failRate: 100 });
+    await t.mutation(api.mockProviders.settings.set, { provider: "printify", failRate: 100 });
+    await t.mutation(api.mockProviders.settings.set, { provider: "gooten", failRate: 100 });
+
+    // Place order with 1s timeout
+    const orderId = await t.mutation(api.example.placeOrder, {
+      items: ["shirt"],
+      timeoutMs: 1000,
+    });
+
+    // Order should start as pending or submitted
+    let orders = await t.query(api.example.listOrders, {});
+    let order = orders.find((o: any) => o._id === orderId);
+    expect(order).toBeDefined();
+    expect(["pending", "submitted"]).toContain(order!.status);
+
+    // Advance time past the hard deadline
+    await vi.advanceTimersByTimeAsync(2000);
+    await t.finishInProgressScheduledFunctions();
+
+    // Order should now be expired
+    orders = await t.query(api.example.listOrders, {});
+    order = orders.find((o: any) => o._id === orderId);
+    expect(order).toBeDefined();
+    expect(order!.status).toBe("expired");
+  });
+
+  test("timeoutMs is persisted on order record", async () => {
+    const t = initConvexTest();
+    await t.mutation(api.example.setup, {});
+
+    const orderId = await t.mutation(api.example.placeOrder, {
+      items: ["shirt"],
+      timeoutMs: 5000,
+    });
+
+    const orders = await t.query(api.example.listOrders, {});
+    const order = orders.find((o: any) => o._id === orderId);
+    expect(order).toBeDefined();
+    expect(order!.timeoutMs).toBe(5000);
+  });
 });

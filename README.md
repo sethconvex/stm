@@ -100,7 +100,7 @@ await stm.atomic(ctx, async (tx) => {
 // → Providers webhook back accepted/rejected
 // → Webhook writes the TVar → transaction re-runs
 
-// Phase 2: wait for results with timeout
+// Phase 2: wait for results with timeout + automatic re-run
 const result = await stm.atomic(ctx, async (tx) => {
   const winners = {};
   for (const item of ["shirt", "mug", "poster"]) {
@@ -116,9 +116,14 @@ const result = await stm.atomic(ctx, async (tx) => {
     );
   }
   return winners;
+}, {
+  // Re-run automatically when a TVar changes (provider responds)
+  callbackHandle: retryHandle,
+  callbackArgs: { orderId },
+  txId: `order:${orderId}:wait`,  // stable across retries
 });
 // committed → all items sourced → ship it
-// not committed → timed out → order expired
+// not committed + timedOut → all branches timed out → order expired
 ```
 
 ## How it works

@@ -10,6 +10,7 @@ export default defineSchema({
       v.literal("fulfilled"),
       v.literal("expired"),
     ),
+    timeoutMs: v.optional(v.number()),
     assignments: v.optional(v.any()),
     attempts: v.array(
       v.object({

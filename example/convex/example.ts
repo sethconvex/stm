@@ -87,6 +87,7 @@ export const placeOrder = mutation({
   handler: async (ctx, { items, timeoutMs }) => {
     const orderId = await ctx.db.insert("orders", {
       items, status: "pending", attempts: [],
+      ...(timeoutMs ? { timeoutMs } : {}),
     });
 
     for (const item of items) {
@@ -176,9 +177,9 @@ export const handleWebhook = internalMutation({
       attempts: [...order.attempts, { item, provider, result, at: Date.now() }],
     });
 
-    // Re-run — might be complete now
+    // Re-run — might be complete now. Pass timeoutMs from the order.
     const items: string[] = JSON.parse(itemsJson);
-    await runOrder(ctx, order._id, items);
+    await runOrder(ctx, order._id, items, order.timeoutMs);
   },
 });
 
@@ -242,7 +243,7 @@ export const toggleProvider = mutation({
       const orders = await ctx.db.query("orders").collect();
       for (const o of orders) {
         if (o.status === "pending" || o.status === "submitted")
-          await runOrder(ctx, o._id, o.items);
+          await runOrder(ctx, o._id, o.items, o.timeoutMs);
       }
     }
   },
@@ -258,7 +259,7 @@ export const setAvailable = mutation({
       const orders = await ctx.db.query("orders").collect();
       for (const o of orders) {
         if (o.status === "pending" || o.status === "submitted")
-          await runOrder(ctx, o._id, o.items);
+          await runOrder(ctx, o._id, o.items, o.timeoutMs);
       }
     }
   },
