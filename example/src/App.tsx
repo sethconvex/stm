@@ -427,72 +427,123 @@ function QueueDemo() {
   const enqueue = useMutation(api.queue.enqueue);
   const dequeue = useMutation(api.queue.dequeue);
   const setupQ = useMutation(api.queue.setupQueues);
-  const [generating, setGenerating] = useState(false);
-  const genRef = useRef(false);
+
+  const [producerRate, setProducerRate] = useState(5);  // jobs/sec
+  const [consumerCount, setConsumerCount] = useState(1);
+  const [running, setRunning] = useState(false);
+  const producerRef = useRef(false);
+  const consumerRefs = useRef<number[]>([]);
 
   const randomJob = () => JOB_NAMES[Math.floor(Math.random() * JOB_NAMES.length)];
   const randomQueue = () => ["critical", "normal", "normal", "bulk", "bulk", "bulk"][Math.floor(Math.random() * 6)];
 
-  const startGenerating = () => {
-    setGenerating(true);
-    genRef.current = true;
-    const tick = () => {
-      if (!genRef.current) return;
+  const start = () => {
+    setRunning(true);
+    producerRef.current = true;
+
+    // Producer loop
+    const producerTick = () => {
+      if (!producerRef.current) return;
       enqueue({ queue: randomQueue(), job: randomJob() });
-      window.setTimeout(tick, 300 + Math.random() * 700);
+      window.setTimeout(producerTick, 1000 / producerRate);
     };
-    tick();
+    producerTick();
+
+    // Consumer loops
+    consumerRefs.current = [];
+    for (let i = 0; i < consumerCount; i++) {
+      const consumerTick = () => {
+        if (!producerRef.current) return;
+        dequeue({});
+        const id = window.setTimeout(consumerTick, 200 + Math.random() * 300);
+        consumerRefs.current.push(id);
+      };
+      consumerTick();
+    }
   };
 
-  const stopGenerating = () => {
-    setGenerating(false);
-    genRef.current = false;
+  const stop = () => {
+    setRunning(false);
+    producerRef.current = false;
+    for (const id of consumerRefs.current) clearTimeout(id);
+    consumerRefs.current = [];
   };
+
+  const totalQueued = (queues.critical?.length ?? 0) + (queues.normal?.length ?? 0) + (queues.bulk?.length ?? 0);
 
   return (
     <div>
-      <div className="queue-controls">
-        <button onClick={() => setupQ({})}>Reset Queues</button>
-        <button onClick={() => enqueue({ queue: "critical", job: randomJob() })}>+ Critical</button>
-        <button onClick={() => enqueue({ queue: "normal", job: randomJob() })}>+ Normal</button>
-        <button onClick={() => enqueue({ queue: "bulk", job: randomJob() })}>+ Bulk</button>
-        <button onClick={() => dequeue({})}>Take Next</button>
-        {generating
-          ? <button className="stop-btn" onClick={stopGenerating}>Stop Load</button>
-          : <button onClick={startGenerating}>Generate Load</button>
-        }
+      <div className="queue-settings">
+        <label>
+          <span className="qs-label">Producers</span>
+          <input type="range" min={1} max={50} value={producerRate}
+            onChange={(e) => setProducerRate(Number(e.target.value))} />
+          <span className="qs-value">{producerRate}/s</span>
+        </label>
+        <label>
+          <span className="qs-label">Consumers</span>
+          <input type="range" min={1} max={10} value={consumerCount}
+            onChange={(e) => setConsumerCount(Number(e.target.value))} />
+          <span className="qs-value">{consumerCount}</span>
+        </label>
+        <div className="queue-buttons">
+          {running
+            ? <button className="stop-btn" onClick={stop}>Stop</button>
+            : <button onClick={start}>Start</button>
+          }
+          <button onClick={() => { stop(); setupQ({}); }}>Reset</button>
+        </div>
+      </div>
+
+      <div className="queue-stats">
+        <span>Queued: <strong>{totalQueued}</strong></span>
+        <span>Processed: <strong>{processed.length}</strong></span>
       </div>
 
       <div className="queue-pipes">
-        {(["critical", "normal", "bulk"] as const).map((q) => (
-          <div key={q} className="queue-pipe" style={{ borderColor: QUEUE_COLORS[q] }}>
-            <div className="pipe-header">
-              <span>{QUEUE_LABELS[q]}</span>
-              <span className="pipe-count">{queues[q]?.length ?? 0}</span>
+        {(["critical", "normal", "bulk"] as const).map((q) => {
+          const items = queues[q] ?? [];
+          return (
+            <div key={q} className="queue-pipe" style={{ borderColor: QUEUE_COLORS[q] }}>
+              <div className="pipe-header">
+                <span>{QUEUE_LABELS[q]}</span>
+                <span className="pipe-count">{items.length}</span>
+              </div>
+              <div className="pipe-bar-track">
+                <div className="pipe-bar-fill" style={{
+                  width: `${Math.min(100, items.length * 2)}%`,
+                  background: QUEUE_COLORS[q],
+                }} />
+              </div>
+              <div className="pipe-items">
+                {items.slice(0, 8).map((job, i) => (
+                  <span key={i} className="pipe-item" style={{ background: QUEUE_COLORS[q] + "22", borderColor: QUEUE_COLORS[q] }}>
+                    {job}
+                  </span>
+                ))}
+                {items.length > 8 && <span className="pipe-overflow">+{items.length - 8} more</span>}
+                {items.length === 0 && <span className="pipe-empty">empty</span>}
+              </div>
             </div>
-            <div className="pipe-items">
-              {(queues[q] ?? []).map((job, i) => (
-                <span key={i} className="pipe-item" style={{ background: QUEUE_COLORS[q] + "22", borderColor: QUEUE_COLORS[q] }}>
-                  {job}
-                </span>
-              ))}
-              {(queues[q] ?? []).length === 0 && <span className="pipe-empty">empty</span>}
-            </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
 
-      <div className="pipe-arrow">{"\u2193"} select(critical, normal, bulk)</div>
+      <div className="pipe-arrow">
+        {"\u2193"} select(critical, normal, bulk) {"\u00D7"} {consumerCount} consumer{consumerCount > 1 ? "s" : ""}
+      </div>
 
       <div className="processed">
-        <h3>Processed</h3>
-        {processed.map((j: any) => (
-          <span key={j._id} className="processed-item" style={{ borderColor: QUEUE_COLORS[j.queue] }}>
-            {j.job}
-            <span className="processed-queue" style={{ color: QUEUE_COLORS[j.queue] }}>{j.queue}</span>
-          </span>
-        ))}
-        {processed.length === 0 && <span className="pipe-empty">none yet</span>}
+        <h3>Recently processed</h3>
+        <div className="processed-items">
+          {processed.map((j: any) => (
+            <span key={j._id} className="processed-item" style={{ borderColor: QUEUE_COLORS[j.queue] }}>
+              {j.job}
+              <span className="processed-queue" style={{ color: QUEUE_COLORS[j.queue] }}>{j.queue}</span>
+            </span>
+          ))}
+          {processed.length === 0 && <span className="pipe-empty">none yet</span>}
+        </div>
       </div>
 
       <div className="panel code">

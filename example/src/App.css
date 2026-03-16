@@ -130,9 +130,22 @@ pre code { font-family: "Fira Code", "JetBrains Mono", Consolas, monospace; }
 .tab.active { color: #e0e0e0; border-bottom-color: #6366f1; }
 
 /* Queue demo */
-.queue-controls { display: flex; gap: 0.4rem; flex-wrap: wrap; margin-bottom: 1rem; }
-.queue-controls button { font-size: 0.8rem; padding: 0.4rem 0.8rem; }
+.queue-settings {
+  background: #111118; border: 1px solid #222; border-radius: 10px;
+  padding: 1rem; margin-bottom: 1rem;
+  display: flex; gap: 1rem; align-items: flex-end; flex-wrap: wrap;
+}
+.queue-settings label { display: flex; align-items: center; gap: 0.5rem; flex: 1; min-width: 150px; }
+.qs-label { font-size: 0.75rem; color: #888; width: 70px; }
+.qs-value { font-size: 0.8rem; font-weight: 700; min-width: 30px; text-align: right; font-variant-numeric: tabular-nums; }
+.queue-settings input[type="range"] { flex: 1; accent-color: #6366f1; }
+.queue-buttons { display: flex; gap: 0.4rem; }
+.queue-buttons button { font-size: 0.8rem; padding: 0.4rem 1rem; }
 .stop-btn { background: linear-gradient(135deg, #ef4444, #dc2626) !important; }
+.queue-stats {
+  display: flex; gap: 1.5rem; margin-bottom: 0.75rem; font-size: 0.85rem; color: #888;
+}
+.queue-stats strong { color: #e0e0e0; font-variant-numeric: tabular-nums; }
 
 .queue-pipes { display: flex; gap: 0.75rem; margin-bottom: 0.5rem; }
 .queue-pipe {
@@ -144,7 +157,11 @@ pre code { font-family: "Fira Code", "JetBrains Mono", Consolas, monospace; }
   margin-bottom: 0.5rem; font-size: 0.85rem; font-weight: 700;
 }
 .pipe-count { font-size: 0.75rem; color: #888; font-variant-numeric: tabular-nums; }
+.pipe-bar-track { height: 4px; background: #1a1a2e; border-radius: 2px; margin-bottom: 0.5rem; overflow: hidden; }
+.pipe-bar-fill { height: 100%; border-radius: 2px; transition: width 0.3s ease; }
 .pipe-items { display: flex; flex-direction: column; gap: 0.3rem; }
+.pipe-overflow { font-size: 0.65rem; color: #555; font-style: italic; }
+.processed-items { display: flex; flex-wrap: wrap; gap: 0.15rem; }
 .pipe-item {
   font-size: 0.72rem; padding: 0.2rem 0.5rem; border-radius: 4px;
   border: 1px solid; font-weight: 600; animation: slide-in 0.3s ease;
