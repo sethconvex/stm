@@ -13,7 +13,7 @@ const stm = new STM(components.stm);
 // ═══════════════════════════════════════════════════════════════════════
 
 const PROVIDERS = ["printful", "printify", "gooten"] as const;
-const PRODUCTS = ["shirt", "mug", "poster"] as const;
+const _PRODUCTS = ["shirt", "mug", "poster"] as const;
 const CATALOG: Record<string, string[]> = {
   printful: ["shirt", "mug"],
   printify: ["shirt", "poster"],

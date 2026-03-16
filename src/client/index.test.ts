@@ -1,5 +1,4 @@
 import { describe, expect, test } from "vitest";
-import { anyApi, type ApiFromModules } from "convex/server";
 import { components, initConvexTest } from "./setup.test.js";
 
 describe("STM client tests", () => {

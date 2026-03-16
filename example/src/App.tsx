@@ -1,14 +1,14 @@
 import "./App.css";
 import { useMutation, useQuery } from "convex/react";
 import { api } from "../convex/_generated/api";
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useRef, useCallback } from "react";
 
 function useDebouncedCallback<T extends (...args: any[]) => any>(fn: T, ms: number): T {
-  const timer = useRef<ReturnType<typeof window.setTimeout>>();
+  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   return useCallback((...args: any[]) => {
     clearTimeout(timer.current);
-    timer.current = window.setTimeout(() => fn(...args), ms);
-  }, [fn, ms]) as any;
+    timer.current = setTimeout(() => fn(...args), ms);
+  }, [fn, ms]) as unknown as T;
 }
 
 const PRODUCTS = [
@@ -23,13 +23,13 @@ const PROVIDER_COLORS: Record<string, string> = {
   gooten: "#9333ea",
 };
 
-type ProviderCfg = { online: boolean; rate: number; timeout: number };
+type ProviderCfg = { online: boolean; rate: number; maxDelay: number };
 type SetupCfg = Record<string, ProviderCfg>;
 
 const ALL_ON: SetupCfg = {
-  printful: { online: true, rate: 0, timeout: 5000 },
-  printify: { online: true, rate: 0, timeout: 5000 },
-  gooten:   { online: true, rate: 0, timeout: 5000 },
+  printful: { online: true, rate: 0, maxDelay: 5000 },
+  printify: { online: true, rate: 0, maxDelay: 5000 },
+  gooten:   { online: true, rate: 0, maxDelay: 5000 },
 };
 
 const STEPS = [
@@ -50,9 +50,9 @@ const STEPS = [
     body: "Printful at 100% failure. Both Printful and Printify get the request, but Printful rejects. Printify wins by default.",
     action: { type: "order" as const, items: ["shirt"] },
     setup: {
-      printful: { online: true, rate: 100, timeout: 5000 },
-      printify: { online: true, rate: 0, timeout: 5000 },
-      gooten:   { online: true, rate: 0, timeout: 5000 },
+      printful: { online: true, rate: 100, maxDelay: 5000 },
+      printify: { online: true, rate: 0, maxDelay: 5000 },
+      gooten:   { online: true, rate: 0, maxDelay: 5000 },
     },
   },
   {
@@ -66,9 +66,9 @@ const STEPS = [
     body: "Printful completely offline. Shirts can only come from Printify, mugs only from Gooten.",
     action: { type: "order" as const, items: ["shirt", "mug"] },
     setup: {
-      printful: { online: false, rate: 0, timeout: 5000 },
-      printify: { online: true, rate: 0, timeout: 5000 },
-      gooten:   { online: true, rate: 0, timeout: 5000 },
+      printful: { online: false, rate: 0, maxDelay: 5000 },
+      printify: { online: true, rate: 0, maxDelay: 5000 },
+      gooten:   { online: true, rate: 0, maxDelay: 5000 },
     },
   },
   {
@@ -76,9 +76,9 @@ const STEPS = [
     body: "All providers: 60% failure. We race them all, but most reject. Watch the providers light up as they accept items one by one.",
     action: { type: "order" as const, items: ["shirt", "mug", "poster"] },
     setup: {
-      printful: { online: true, rate: 60, timeout: 5000 },
-      printify: { online: true, rate: 60, timeout: 5000 },
-      gooten:   { online: true, rate: 60, timeout: 5000 },
+      printful: { online: true, rate: 60, maxDelay: 5000 },
+      printify: { online: true, rate: 60, maxDelay: 5000 },
+      gooten:   { online: true, rate: 60, maxDelay: 5000 },
     },
   },
   {
@@ -94,30 +94,32 @@ const STEPS = [
 function Walkthrough({
   onOrder,
   onSetRate,
-  onSetTimeout,
+  onSetMaxDelay,
   onSetAvailable,
 }: {
   onOrder: (items: string[]) => void;
   onSetRate: (provider: string, rate: number) => void;
-  onSetTimeout: (provider: string, timeout: number) => void;
+  onSetMaxDelay: (provider: string, maxDelay: number) => void;
   onSetAvailable: (provider: string, available: boolean) => void;
 }) {
   const [step, setStep] = useState(0);
-  const [applied, setApplied] = useState(false);
   const current = STEPS[step];
 
-  const applySetup = (s: (typeof STEPS)[number]) => {
+  const applySetup = useCallback((s: (typeof STEPS)[number]) => {
     if (!s.setup) return;
     for (const [p, cfg] of Object.entries(s.setup)) {
       onSetAvailable(p, cfg.online);
       onSetRate(p, cfg.rate);
-      onSetTimeout(p, cfg.timeout);
+      onSetMaxDelay(p, cfg.maxDelay);
     }
-  };
+  }, [onSetAvailable, onSetRate, onSetMaxDelay]);
 
-  useEffect(() => {
-    if (!applied) { applySetup(STEPS[0]); setApplied(true); }
-  }, [applied]);
+  // Apply setup on mount (once) — using null ref pattern for lint
+  const initializedRef = useRef<boolean | null>(null);
+  if (initializedRef.current == null) {
+    initializedRef.current = true;
+    applySetup(STEPS[0]);
+  }
 
   const goTo = (i: number) => { applySetup(STEPS[i]); setStep(i); };
 
@@ -146,46 +148,27 @@ function Walkthrough({
   );
 }
 
-// ── Provider cards with emoji pop ─────────────────────────────────────
+// ── Provider cards ────────────────────────────────────────────────────
 
-function ProviderCard({ name, info, onToggle, onSetRate, onSetTimeout }: {
+function ProviderCard({ name, info, onToggle, onSetRate, onSetMaxDelay }: {
   name: string;
-  info: { available: boolean; products: string[]; failRate: number; timeout: number };
+  info: { online: boolean; products: string[]; failRate: number; maxDelay: number };
   onToggle: () => void;
   onSetRate: (rate: number) => void;
-  onSetTimeout: (timeout: number) => void;
+  onSetMaxDelay: (maxDelay: number) => void;
 }) {
-  const orders = useQuery(api.example.listOrders) ?? [];
-  const [pops, setPops] = useState<{ id: number; emoji: string }[]>([]);
-  const prevAttemptsRef = useRef<number>(0);
-
-  // Local slider state for instant feedback
   const [localRate, setLocalRate] = useState(info.failRate);
   const [localMaxDelay, setLocalMaxDelay] = useState(info.maxDelay);
-  useEffect(() => { setLocalRate(info.failRate); }, [info.failRate]);
-  useEffect(() => { setLocalMaxDelay(info.maxDelay); }, [info.maxDelay]);
+  // Sync from server when props change
+  if (localRate !== info.failRate && !document.activeElement?.closest('.sliders')) {
+    setLocalRate(info.failRate);
+  }
+  if (localMaxDelay !== info.maxDelay && !document.activeElement?.closest('.sliders')) {
+    setLocalMaxDelay(info.maxDelay);
+  }
 
   const debouncedSetRate = useDebouncedCallback(onSetRate, 300);
-  const debouncedSetTimeout = useDebouncedCallback(onSetTimeout, 300);
-
-  // Watch for new "accepted" attempts → pop emoji
-  useEffect(() => {
-    const allAttempts = orders.flatMap((o) =>
-      (o.attempts as any[]).filter(
-        (a) => a.provider === name && a.result === "accepted",
-      ),
-    );
-    if (allAttempts.length > prevAttemptsRef.current) {
-      const newOnes = allAttempts.slice(prevAttemptsRef.current);
-      for (const a of newOnes) {
-        const emoji = PRODUCTS.find((p) => p.key === a.item)?.emoji ?? "?";
-        const id = Date.now() + Math.random();
-        setPops((prev) => [...prev, { id, emoji }]);
-        window.setTimeout(() => setPops((prev) => prev.filter((p) => p.id !== id)), 1500);
-      }
-    }
-    prevAttemptsRef.current = allAttempts.length;
-  }, [orders, name]);
+  const debouncedSetMaxDelay = useDebouncedCallback(onSetMaxDelay, 300);
 
   return (
     <div className={`provider-card ${info.online ? "online" : "offline"}`} style={{ borderColor: info.online ? PROVIDER_COLORS[name] : "#333" }}>
@@ -209,17 +192,12 @@ function ProviderCard({ name, info, onToggle, onSetRate, onSetTimeout }: {
           <div className="slider-row">
             <span className="slider-label">Max wait</span>
             <input type="range" min={500} max={10000} step={500} value={localMaxDelay}
-              onChange={(e) => { const v = Number(e.target.value); setLocalMaxDelay(v); debouncedSetTimeout(v); }}
+              onChange={(e) => { const v = Number(e.target.value); setLocalMaxDelay(v); debouncedSetMaxDelay(v); }}
               style={{ accentColor: PROVIDER_COLORS[name] }} />
             <span className="slider-value">{(localMaxDelay / 1000).toFixed(1)}s</span>
           </div>
         </div>
       )}
-      <div className="pop-container">
-        {pops.map((p) => (
-          <span key={p.id} className="pop-emoji">{p.emoji}</span>
-        ))}
-      </div>
     </div>
   );
 }
@@ -235,10 +213,10 @@ function ProviderStatus() {
         <ProviderCard
           key={name}
           name={name}
-          info={info as any}
+          info={info as { online: boolean; products: string[]; failRate: number; maxDelay: number }}
           onToggle={() => toggle({ provider: name })}
           onSetRate={(rate) => setSettings({ provider: name, failRate: rate })}
-          onSetTimeout={(maxDelay) => setSettings({ provider: name, maxDelay })}
+          onSetMaxDelay={(maxDelay) => setSettings({ provider: name, maxDelay })}
         />
       ))}
     </div>
@@ -250,7 +228,7 @@ function ProviderStatus() {
 function OrderForm() {
   const placeOrder = useMutation(api.example.placeOrder);
   const [cart, setCart] = useState<Set<string>>(new Set(["shirt"]));
-  const [timeout, setTimeout] = useState(false);
+  const [timeout, setTimeoutOn] = useState(false);
   const toggleItem = (item: string) => {
     setCart((prev) => { const n = new Set(prev); if (n.has(item)) n.delete(item); else n.add(item); return n; });
   };
@@ -268,7 +246,7 @@ function OrderForm() {
       </div>
       <div className="timeout-row">
         <label className="timeout-toggle">
-          <input type="checkbox" checked={timeout} onChange={(e) => setTimeout(e.target.checked)} />
+          <input type="checkbox" checked={timeout} onChange={(e) => setTimeoutOn(e.target.checked)} />
           <span>3s order timeout</span>
         </label>
         <span className="timeout-hint">
@@ -361,7 +339,7 @@ function App() {
       <Walkthrough
         onOrder={(items) => placeOrder({ items })}
         onSetRate={(p, r) => setSettings({ provider: p, failRate: r })}
-        onSetTimeout={(p, t) => setSettings({ provider: p, maxDelay: t })}
+        onSetMaxDelay={(p, t) => setSettings({ provider: p, maxDelay: t })}
         onSetAvailable={(p, a) => setAvail({ provider: p, available: a })}
       />
 
@@ -373,24 +351,29 @@ function App() {
             <h2>The code</h2>
             <pre>{`// ── PHASE 1: SUBMIT ─────────────────────────────
 // One transaction submits ALL items to ALL providers.
-// Pure logic. No API calls. Commits immediately so
-// the IO phase can start.
+// afterCommit schedules IO — only fires on commit.
 
 await stm.atomic(ctx, async (tx) => {
   for (const item of ["shirt", "mug", "poster"]) {
     for (const p of providersFor(item)) {
       if (!await tx.read(\`provider:\${p}:online\`)) continue;
       tx.write(\`\${orderId}:\${item}:\${p}\`, "submitted");
+
+      tx.afterCommit(async (ctx) => {
+        await ctx.scheduler.runAfter(0, submitToProvider, {
+          item, provider: p
+        });
+      });
     }
   }
 });
-// → Actions call fetch() to each provider's API.
-// → Providers process, then webhook back accepted/rejected.
-// → Webhook writes the result into the TVar.
+// → Actions call fetch() to each provider
+// → Providers webhook back accepted/rejected
+// → Webhook writes the TVar
 
 // ── PHASE 2: WAIT ───────────────────────────────
-// Second transaction waits for results. All items checked
-// in parallel — select() per item with a timeout.
+// select() per item with timeout. All items checked
+// each re-run — providers race in parallel.
 
 const result = await stm.atomic(ctx, async (tx) => {
   const winners = {};
@@ -399,21 +382,16 @@ const result = await stm.atomic(ctx, async (tx) => {
       ...providersFor(item).map(p => ({
         fn: async () => {
           const s = await tx.read(\`\${orderId}:\${item}:\${p}\`);
-          if (s === "accepted") return p;  // this provider won
-          tx.retry();  // not yet — keep waiting
+          if (s === "accepted") return p;
+          tx.retry();
         },
-        timeout: 3000,  // give up after 3s
+        timeout: 3000,
       })),
     );
   }
   return winners;
 });
 
-// The for loop checks items in order, but providers are
-// racing in parallel (all submitted at once in phase 1).
-// If any item isn't ready, the whole transaction retries.
-// When it re-runs, multiple items may have resolved.
-//
 // committed → every item has a winner → ship it
 // not committed → timed out → order expired
 // No partial orders. All items or nothing.`}</pre>
