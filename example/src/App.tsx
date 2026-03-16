@@ -318,19 +318,13 @@ function OrderFeed() {
                     )}
                     <span className="item-attempts">
                       {itemAttempts.map((a, i) => (
-                        <span
-                          key={i}
-                          className={`attempt-dot ${a.result}`}
-                          title={`${a.provider}: ${a.result}`}
-                          style={{
-                            background:
-                              a.result === "confirmed" ? PROVIDER_COLORS[a.provider]
-                              : a.result === "ready" ? PROVIDER_COLORS[a.provider] + "88"
-                              : a.result === "accepted" ? PROVIDER_COLORS[a.provider]
-                              : a.result === "canceled" ? "#555"
-                              : "#ef4444",
-                          }}
-                        />
+                        <span key={i} className={`attempt-tag ${a.result}`}>
+                          {a.provider.slice(0, 2).toUpperCase()}
+                          {a.result === "confirmed" ? " \u2713\u2713"
+                           : a.result === "ready" ? " \u2713"
+                           : a.result === "rejected" ? " \u2717"
+                           : ""}
+                        </span>
                       ))}
                     </span>
                   </div>
@@ -370,35 +364,39 @@ function App() {
           <button className="reset-btn" onClick={() => setup({})}>Reset</button>
           <div className="panel code">
             <h2>The code</h2>
-            <pre>{`// Readable helpers hide the plumbing
-async function isProviderOnline(tx, provider) { ... }
-async function getWinner(tx, orderId, item) { ... }
-async function setWinner(tx, orderId, item, provider) { ... }
-async function getProviderStatus(tx, orderId, item, provider) { ... }
-
-// Fulfill a cart — submit all items to all providers at once
+            <pre>{`// Phase 1: Submit to all providers for all items at once
 await stm.atomic(ctx, async (tx) => {
   for (const item of order.items) {
-    if (await getWinner(tx, orderId, item)) continue;
-
     for (const p of providersFor(item)) {
       if (!await isProviderOnline(tx, p)) continue;
-      if (!await getProviderStatus(tx, orderId, item, p))
+      const status = await getProviderStatus(tx, orderId, item, p);
+      if (!status || status === "rejected")
         markSubmitted(tx, orderId, item, p);
     }
   }
 });
-// Each provider gets a fetch() call → processes → webhooks back.
+// → fetch() to each provider. They process and webhook back.
 
-// Provider says "I'm ready" — atomically pick a winner
-async function confirmOrCancel(tx, orderId, item, provider) {
-  const winner = await getWinner(tx, orderId, item);
-  if (winner === provider) return "CONFIRM";  // you already won
-  if (winner) return "CANCEL";                // too late
-  await setWinner(tx, orderId, item, provider);
-  return "CONFIRM";                           // you're first!
+// Providers webhook "ready" — we note it but DON'T confirm yet.
+// We wait until ALL items have a "ready" provider.
+
+// Phase 2: All items ready → confirm every winner at once
+if (allItemsHaveReadyProvider) {
+  for (const { item, provider } of winners) {
+    await fetch(\`\${provider}/confirm\`, {       // ← real HTTP call
+      body: { orderId, item, action: "CONFIRM" }
+    });
+    // 200 = confirmed, they're printing it
+  }
 }
-// Idempotent. Call it 10 times, same answer every time.`}</pre>
+
+// If timeout fires before all items are ready:
+for (const { item, provider } of readyProviders) {
+  await fetch(\`\${provider}/confirm\`, {
+    body: { orderId, item, action: "CANCEL" }   // ← release hold
+  });
+}
+// No partial fulfillment. All or nothing.`}</pre>
           </div>
         </div>
         <div className="col-right">
