@@ -188,16 +188,16 @@ function ProviderCard({ name, info, onToggle, onSetRate, onSetTimeout }: {
   }, [orders, name]);
 
   return (
-    <div className={`provider-card ${info.available ? "online" : "offline"}`} style={{ borderColor: info.available ? PROVIDER_COLORS[name] : "#333" }}>
+    <div className={`provider-card ${info.online ? "online" : "offline"}`} style={{ borderColor: info.online ? PROVIDER_COLORS[name] : "#333" }}>
       <div className="provider-top" onClick={onToggle}>
-        <span className="provider-dot" style={{ background: info.available ? PROVIDER_COLORS[name] : "#555" }} />
+        <span className="provider-dot" style={{ background: info.online ? PROVIDER_COLORS[name] : "#555" }} />
         <span className="provider-name">{name}</span>
         <span className="provider-products">
           {info.products.map((pr) => PRODUCTS.find((x) => x.key === pr)?.emoji).join(" ")}
         </span>
-        <span className="provider-status">{info.available ? "online" : "offline"}</span>
+        <span className="provider-status">{info.online ? "online" : "offline"}</span>
       </div>
-      {info.available && (
+      {info.online && (
         <div className="sliders">
           <div className="slider-row">
             <span className="slider-label">Fail</span>
@@ -373,39 +373,29 @@ function App() {
           <button className="reset-btn" onClick={() => setup({})}>Reset</button>
           <div className="panel code">
             <h2>The code</h2>
-            <pre>{`// Phase 1: Submit to all providers for all items at once
+            <pre>{`// Step 1: STM transaction — pick providers (no IO)
 await stm.atomic(ctx, async (tx) => {
-  for (const item of order.items) {
+  for (const item of ["shirt", "mug", "poster"]) {
     for (const p of providersFor(item)) {
-      if (!await isProviderOnline(tx, p)) continue;
-      const status = await getProviderStatus(tx, orderId, item, p);
+      if (!await tx.read(\`provider:\${p}:online\`)) continue;
+      const status = await tx.read(\`\${orderId}:\${item}:\${p}\`);
       if (!status || status === "rejected")
-        markSubmitted(tx, orderId, item, p);
+        tx.write(\`\${orderId}:\${item}:\${p}\`, "submitted");
     }
   }
 });
-// → fetch() to each provider. They process and webhook back.
 
-// Providers webhook "ready" — we note it but DON'T confirm yet.
-// We wait until ALL items have a "ready" provider.
+// Step 2: IO — call each provider's API
+await fetch(\`\${provider}/order\`, { body: { orderId, item } });
+// Provider processes... then webhooks back accepted/rejected.
 
-// Phase 2: All items ready → confirm every winner at once
-if (allItemsHaveReadyProvider) {
-  for (const { item, provider } of winners) {
-    await fetch(\`\${provider}/confirm\`, {       // ← real HTTP call
-      body: { orderId, item, action: "CONFIRM" }
-    });
-    // 200 = confirmed, they're printing it
-  }
-}
-
-// If timeout fires before all items are ready:
-for (const { item, provider } of readyProviders) {
-  await fetch(\`\${provider}/confirm\`, {
-    body: { orderId, item, action: "CANCEL" }   // ← release hold
-  });
-}
-// No partial fulfillment. All or nothing.`}</pre>
+// Step 3: Webhook writes the result back into a TVar
+await ctx.runMutation(components.stm.lib.commit, {
+  writes: [{ key: \`\${orderId}:\${item}:\${provider}\`, value: "accepted" }]
+});
+// → Re-runs the STM transaction. First provider to accept wins.
+// → If all items have a winner, order is fulfilled.
+// → If not, keep waiting. Timeout cancels the whole order.`}</pre>
           </div>
         </div>
         <div className="col-right">
