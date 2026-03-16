@@ -2,85 +2,111 @@
 
 Operations that wait for the right conditions and complete automatically.
 When conditions change, blocked operations re-run and pick up where they
-left off.
+left off. No polling. No subscriptions. No event wiring.
 
-## What it does
+Based on [Harris et al., "Composable Memory Transactions" (PPoPP 2005)](https://research.microsoft.com/en-us/um/people/simonpj/papers/stm/),
+with ideas from Haskell GHC, Clojure STM, and Scala ScalaSTM.
 
-You write a function that reads some shared state. If the state isn't
-ready (out of stock, provider offline, slot full), call `tx.retry()`.
-The operation waits — and when the state changes, it re-runs automatically.
+## The primitives
 
-No polling. No subscriptions. No event wiring.
+### `tx.read(key)` / `tx.write(key, value)`
 
-## Example: multi-item fulfillment
+Read and write shared state inside a transaction. Reads fetch on demand.
+Writes are buffered and applied atomically when the transaction commits.
 
-A t-shirt store uses three print providers, each making different products:
+### `tx.retry()`
 
-| Provider | Makes |
-|----------|-------|
-| Printful | shirt, mug |
-| Printify | shirt, poster |
-| Gooten | mug, poster |
+"I can't proceed right now." The system records what was read, waits
+until one of those values changes, then re-runs the transaction.
 
-An order for shirt + mug + poster must be split across providers.
+### `tx.select(...branches)`
 
-### Step 1: One function to try one provider
-
-```typescript
-async function tryProvider(tx: TX, orderId: string, item: string, provider: string) {
-  const available = await tx.read(`provider:${provider}:available`);
-  if (!available) tx.retry();  // offline — skip, watch for it to come back
-
-  const result = await tx.read(`order:${orderId}:${item}:${provider}`);
-  if (result === null) {
-    tx.write(`order:${orderId}:${item}:${provider}`, "submitted");
-    return provider;  // submit to this provider
-  }
-  if (result === "submitted") tx.retry();    // waiting for API response
-  if (result === "accepted")  return provider; // done!
-  tx.retry();  // rejected — try next
-}
-```
-
-### Step 2: Select across providers for one item
+Try each branch in order. First one that doesn't retry wins. If all
+retry, wait for any of their conditions to change. Branches can have
+a timeout — give up after N ms and try the next one.
 
 ```typescript
-const provider = await tx.select(
-  async () => await tryProvider(tx, orderId, "shirt", "printful"),
-  async () => await tryProvider(tx, orderId, "shirt", "printify"),
+await tx.select(
+  { fn: async () => claimFrom(tx, "printful"), timeout: 3000 },
+  { fn: async () => claimFrom(tx, "printify"), timeout: 5000 },
+  async () => claimFrom(tx, "gooten"),
 );
 ```
 
-Tries each provider in order. First one that doesn't block wins.
+### `tx.afterCommit(fn)`
 
-### Step 3: Compose into a cart — all items atomic
+Schedule IO to run after the transaction commits. If the transaction
+retries or throws, the callback is discarded. Use this to bridge
+between pure STM logic and side effects (fetch, actions, etc).
 
 ```typescript
 await stm.atomic(ctx, async (tx) => {
-  for (const item of ["shirt", "mug", "poster"]) {
-    await tx.select(
-      ...providersFor(item).map(p => async () =>
-        await tryProvider(tx, orderId, item, p)
-      ),
-    );
-  }
+  tx.write("order:status", "submitted");
+  tx.afterCommit(async (ctx) => {
+    await ctx.scheduler.runAfter(0, internal.actions.callProvider, {});
+  });
 });
 ```
 
-If any item can't be sourced, the **whole cart waits**. When a provider
-comes back online, the cart re-evaluates and completes atomically.
+### `tx.take(key)` / `tx.put(key, value)` (TMVar)
 
-### Step 4: Provider responds via webhook
-
-The provider's API response (or webhook) writes the result, which
-triggers the cart transaction to re-run:
+A TVar that can be empty or full. `take` blocks if empty, leaves it
+empty. `put` blocks if full. Classic producer/consumer channel.
 
 ```typescript
+await stm.initTMVar(ctx, "slot");             // empty
+const val = await tx.take("slot");            // blocks until someone puts
+await tx.put("slot", result);                 // blocks until someone takes
+```
+
+### `stm.atomic(ctx, handler)`
+
+Run the handler atomically. Returns `{ committed: true, value }` on
+success, or `{ committed: false }` if the handler called `retry()`.
+
+## Example: multi-item fulfillment
+
+Three print providers, each making different products. An order for
+shirt + mug + poster must be split across them.
+
+```typescript
+// Phase 1: submit to all providers at once
 await stm.atomic(ctx, async (tx) => {
-  tx.write(`order:${orderId}:${item}:${provider}`, "accepted");
+  for (const item of ["shirt", "mug", "poster"]) {
+    for (const p of providersFor(item)) {
+      if (!await tx.read(`provider:${p}:online`)) continue;
+      tx.write(`${orderId}:${item}:${p}`, "submitted");
+
+      // IO happens only if this transaction commits
+      tx.afterCommit(async (ctx) => {
+        await ctx.scheduler.runAfter(0, submitToProvider, { item, provider: p });
+      });
+    }
+  }
 });
-// ^ This wakes the blocked cart. It re-runs, sees the acceptance,
-//   and continues with the next item.
+// → Actions call fetch() to each provider
+// → Providers webhook back accepted/rejected
+// → Webhook writes the TVar → transaction re-runs
+
+// Phase 2: wait for results with timeout
+const result = await stm.atomic(ctx, async (tx) => {
+  const winners = {};
+  for (const item of ["shirt", "mug", "poster"]) {
+    winners[item] = await tx.select(
+      ...providersFor(item).map(p => ({
+        fn: async () => {
+          const s = await tx.read(`${orderId}:${item}:${p}`);
+          if (s === "accepted") return p;
+          tx.retry();
+        },
+        timeout: 3000,
+      })),
+    );
+  }
+  return winners;
+});
+// committed → all items sourced → ship it
+// not committed → timed out → order expired
 ```
 
 ## How it works
@@ -88,10 +114,13 @@ await stm.atomic(ctx, async (tx) => {
 1. Your function reads shared state and decides what to do
 2. If it calls `tx.retry()`, the system records what was read
 3. The operation waits (no CPU, no polling)
-4. When any of those values change, the operation re-runs from scratch
-5. Writes are buffered and applied atomically when the function returns
+4. When any of those values change, the operation re-runs
+5. Writes are buffered and applied atomically on commit
+6. `afterCommit` callbacks fire only after a successful commit
 
-Based on [Harris et al., "Composable Memory Transactions" (PPoPP 2005)](https://research.microsoft.com/en-us/um/people/simonpj/papers/stm/).
+Convex's mutation/action split enforces **no IO inside transactions**
+at the platform level — the same guarantee the original paper gets
+from Haskell's type system.
 
 ## Installation
 
@@ -114,46 +143,17 @@ import { STM } from "@convex-dev/stm";
 const stm = new STM(components.stm);
 ```
 
-## API
-
-### `stm.atomic(ctx, handler, onRetry?)`
-
-Run a function atomically. Reads happen on demand. Writes are buffered
-and committed together.
-
-### `await tx.read(key)` / `tx.write(key, value)`
-
-Read and write shared state inside a transaction.
-
-### `tx.retry()`
-
-"I can't proceed right now." Waits for a read value to change, then
-re-runs.
-
-### `tx.select(option1, option2, ...)`
-
-Try each option in order. First one that doesn't retry wins. If all
-retry, wait for any of their conditions to change.
-
-### `tx.orElse(fn1, fn2)`
-
-Two-option version of `select`.
-
-### `stm.init(ctx, key, value)`
-
-Set an initial value. No-op if it already exists.
-
 ## Demo
 
-See the [example app](./example) for a complete multi-item fulfillment
-system with simulated provider APIs, webhooks, and provider failover.
+The example app shows multi-item order fulfillment across three
+simulated print providers with real HTTP fetch + webhooks.
 
 ```sh
 npm i
 npm run dev
 ```
 
-## Design docs
+## Design
 
-- [model/stm.md](./model/stm.md) — invariants and correctness proofs
+- [model/stm.md](./model/stm.md) — invariants, correctness proofs, paper coverage
 - [model/extensions.md](./model/extensions.md) — future directions
