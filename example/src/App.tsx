@@ -318,7 +318,16 @@ function OrderFeed() {
                     )}
                     <span className="item-attempts">
                       {itemAttempts.map((a, i) => (
-                        <span key={i} className={`attempt-tag ${a.result}`}>
+                        <span
+                          key={i}
+                          className={`attempt-tag ${a.result}`}
+                          title={
+                            a.result === "confirmed" ? `${a.provider}: confirmed — printing`
+                            : a.result === "ready" ? `${a.provider}: ready — holding, waiting for other items`
+                            : a.result === "rejected" ? `${a.provider}: rejected this item`
+                            : `${a.provider}: ${a.result}`
+                          }
+                        >
                           {a.provider}
                           {a.result === "confirmed" ? " \u2713\u2713"
                            : a.result === "ready" ? " \u2713"
