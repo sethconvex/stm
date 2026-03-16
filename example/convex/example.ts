@@ -288,6 +288,33 @@ export const setTimeout = mutation({
   },
 });
 
+export const setAvailable = mutation({
+  args: { provider: v.string(), available: v.boolean() },
+  handler: async (ctx, { provider, available }) => {
+    await stm.atomic(ctx, async (tx) => {
+      tx.write(`provider:${provider}:available`, available);
+    });
+
+    // If turning on, reset rejected orders and retry
+    if (available) {
+      const orders = await ctx.db.query("orders").collect();
+      for (const o of orders) {
+        if (o.status === "pending" || o.status === "submitted") {
+          for (const item of o.items) {
+            if (providersFor(item).includes(provider)) {
+              await stm.atomic(ctx, async (tx) => {
+                const r = await tx.read(`order:${o._id}:${item}:${provider}`);
+                if (r === "rejected") tx.write(`order:${o._id}:${item}:${provider}`, "retry");
+              });
+            }
+          }
+          await runFulfillment(ctx, o._id, o.items);
+        }
+      }
+    }
+  },
+});
+
 export const setup = mutation({
   args: {},
   handler: async (ctx) => {

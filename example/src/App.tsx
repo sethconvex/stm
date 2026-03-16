@@ -15,98 +15,117 @@ const PROVIDER_COLORS: Record<string, string> = {
   gooten: "#9333ea",
 };
 
-type SetupCfg = Record<string, { rate?: number; timeout?: number }>;
+type ProviderCfg = { online: boolean; rate: number; timeout: number };
+type SetupCfg = Record<string, ProviderCfg>;
+
+const ALL_ON: SetupCfg = {
+  printful: { online: true, rate: 0, timeout: 5000 },
+  printify: { online: true, rate: 0, timeout: 5000 },
+  gooten:   { online: true, rate: 0, timeout: 5000 },
+};
 
 const STEPS = [
   {
     title: "Meet the providers",
-    body: "Three print providers, each making different products. Click a card to toggle online/offline. Sliders control failure rate and response timeout.",
+    body: "Three print providers, each making different products. Printful makes shirts + mugs. Printify makes shirts + posters. Gooten makes mugs + posters. Click a card to toggle online/offline.",
     action: null,
-    setup: {
-      printful: { rate: 0, timeout: 5000 },
-      printify: { rate: 0, timeout: 5000 },
-      gooten: { rate: 0, timeout: 5000 },
-    } as SetupCfg,
+    setup: ALL_ON,
   },
   {
     title: "Order a shirt",
-    body: "0% failure, 5s timeout. Printful responds fast and accepts. Watch it go pending \u2192 submitted \u2192 fulfilled.",
+    body: "All providers online, 0% failure. Printful is tried first (it makes shirts). Watch the order go pending \u2192 submitted \u2192 fulfilled.",
     action: { type: "order" as const, items: ["shirt"] },
-    setup: null,
+    setup: ALL_ON,
   },
   {
-    title: "Printful always fails",
-    body: "Printful at 100% failure. Order a shirt \u2014 Printful rejects, STM cascades to Printify automatically.",
+    title: "Printful always rejects",
+    body: "Printful at 100% failure. Order a shirt \u2014 Printful rejects, STM automatically cascades to Printify.",
     action: { type: "order" as const, items: ["shirt"] },
-    setup: { printful: { rate: 100 } } as SetupCfg,
+    setup: {
+      printful: { online: true, rate: 100, timeout: 5000 },
+      printify: { online: true, rate: 0, timeout: 5000 },
+      gooten:   { online: true, rate: 0, timeout: 5000 },
+    },
   },
   {
-    title: "Order the full catalog",
-    body: "Shirt + mug + poster. No single provider makes all three. STM splits the cart. With Printful failing: shirt \u2192 Printify, mug \u2192 Gooten, poster \u2192 Printify or Gooten.",
+    title: "Split across providers",
+    body: "Shirt + mug + poster. No single provider makes all three. With Printful rejecting: shirt \u2192 Printify, mug \u2192 Gooten, poster \u2192 Printify or Gooten. All atomic.",
     action: { type: "order" as const, items: ["shirt", "mug", "poster"] },
-    setup: null,
+    setup: {
+      printful: { online: true, rate: 100, timeout: 5000 },
+      printify: { online: true, rate: 0, timeout: 5000 },
+      gooten:   { online: true, rate: 0, timeout: 5000 },
+    },
+  },
+  {
+    title: "Printful is offline",
+    body: "Printful is completely offline \u2014 not even tried. Shirts can only come from Printify, mugs from Gooten. Order shirt + mug and watch it route around.",
+    action: { type: "order" as const, items: ["shirt", "mug"] },
+    setup: {
+      printful: { online: false, rate: 0, timeout: 5000 },
+      printify: { online: true, rate: 0, timeout: 5000 },
+      gooten:   { online: true, rate: 0, timeout: 5000 },
+    },
   },
   {
     title: "Slow provider \u2192 timeout",
-    body: "Set Printful to 0% failure but 1s timeout. Printful is reliable but SLOW \u2014 it takes up to 2s to respond. Half the time it times out and STM cascades to the next provider.",
+    body: "All online, but Printful has a 1s timeout. It takes up to 2s to respond, so half the time it times out (\u23F1) and STM cascades to the next provider.",
     action: { type: "order" as const, items: ["shirt", "mug"] },
     setup: {
-      printful: { rate: 0, timeout: 1000 },
-      printify: { rate: 0, timeout: 5000 },
-      gooten: { rate: 0, timeout: 5000 },
-    } as SetupCfg,
+      printful: { online: true, rate: 0, timeout: 1000 },
+      printify: { online: true, rate: 0, timeout: 5000 },
+      gooten:   { online: true, rate: 0, timeout: 5000 },
+    },
   },
   {
     title: "Chaos mode",
-    body: "All providers: 60% failure, 2s timeout. Orders bounce between providers, timing out and retrying. Despite the chaos, every order eventually gets fulfilled.",
+    body: "All providers: 60% failure, 2s timeout. Orders bounce between providers, timing out and retrying. Watch the attempt badges pile up. Despite the chaos, every order eventually ships.",
     action: { type: "order" as const, items: ["shirt", "mug", "poster"] },
     setup: {
-      printful: { rate: 60, timeout: 2000 },
-      printify: { rate: 60, timeout: 2000 },
-      gooten: { rate: 60, timeout: 2000 },
-    } as SetupCfg,
+      printful: { online: true, rate: 60, timeout: 2000 },
+      printify: { online: true, rate: 60, timeout: 2000 },
+      gooten:   { online: true, rate: 60, timeout: 2000 },
+    },
   },
   {
     title: "The code",
-    body: "All of this \u2014 routing, failover, timeouts, retries, atomic carts \u2014 is handled by 6 lines of STM code. No state machines. No event plumbing.",
+    body: "Routing, failover, timeouts, retries, atomic multi-item carts \u2014 all handled by a select() per item inside one atomic transaction. No state machines. No event plumbing.",
     action: null,
-    setup: {
-      printful: { rate: 0, timeout: 5000 },
-      printify: { rate: 0, timeout: 5000 },
-      gooten: { rate: 0, timeout: 5000 },
-    } as SetupCfg,
+    setup: ALL_ON,
   },
 ];
 
 function Walkthrough({
   onOrder,
-  onToggle,
   onSetRate,
   onSetTimeout,
+  onSetAvailable,
 }: {
   onOrder: (items: string[]) => void;
-  onToggle: (provider: string) => void;
   onSetRate: (provider: string, rate: number) => void;
   onSetTimeout: (provider: string, timeout: number) => void;
+  onSetAvailable: (provider: string, available: boolean) => void;
 }) {
   const [step, setStep] = useState(0);
   const current = STEPS[step];
 
-  const goTo = (i: number) => {
-    const s = STEPS[i];
-    if (s.setup) {
-      for (const [p, cfg] of Object.entries(s.setup)) {
-        if (cfg.rate !== undefined) onSetRate(p, cfg.rate);
-        if (cfg.timeout !== undefined) onSetTimeout(p, cfg.timeout);
-      }
+  const applySetup = (s: (typeof STEPS)[number]) => {
+    if (!s.setup) return;
+    for (const [p, cfg] of Object.entries(s.setup)) {
+      onSetAvailable(p, cfg.online);
+      onSetRate(p, cfg.rate);
+      onSetTimeout(p, cfg.timeout);
     }
+  };
+
+  const goTo = (i: number) => {
+    applySetup(STEPS[i]);
     setStep(i);
   };
 
   const doAction = () => {
     if (!current.action) return;
     if (current.action.type === "order") onOrder(current.action.items!);
-    if (current.action.type === "toggle") onToggle(current.action.provider!);
   };
 
   return (
@@ -253,6 +272,7 @@ function App() {
   const toggle = useMutation(api.example.toggleProvider);
   const setRate = useMutation(api.example.setFailRate);
   const setTO = useMutation(api.example.setTimeout);
+  const setAvail = useMutation(api.example.setAvailable);
 
   return (
     <div className="app">
@@ -261,9 +281,9 @@ function App() {
 
       <Walkthrough
         onOrder={(items) => placeOrder({ items })}
-        onToggle={(p) => toggle({ provider: p })}
         onSetRate={(p, r) => setRate({ provider: p, rate: r })}
         onSetTimeout={(p, t) => setTO({ provider: p, timeout: t })}
+        onSetAvailable={(p, a) => setAvail({ provider: p, available: a })}
       />
 
       <div className="two-col">
