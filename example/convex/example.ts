@@ -190,12 +190,13 @@ export const handleProviderResponse = internalMutation({
     result: v.string(),
   },
   handler: async (ctx, { orderId, provider, result }) => {
-    // Write the result to the order-level TVar → wakes the blocked transaction
+    // Write the result to the order-level TVar.
+    // This wakes any waiters (if the order was blocking on retry).
     await stm.atomic(ctx, async (tx) => {
       tx.write(`order:${orderId}:${provider}`, result);
     });
 
-    // Also record the attempt on the order document (for UI)
+    // Record the attempt on the order document (for UI).
     const order = await ctx.db.get(orderId as any);
     if (order) {
       await ctx.db.patch(order._id, {
@@ -205,6 +206,15 @@ export const handleProviderResponse = internalMutation({
         ],
       });
     }
+
+    // Always schedule a retry — the waiter might not exist if the
+    // previous transaction committed (submitted to provider) rather
+    // than retried. retryFulfillment is idempotent.
+    await ctx.scheduler.runAfter(
+      0,
+      internal.example.retryFulfillment,
+      { orderId: orderId as any },
+    );
   },
 });
 
