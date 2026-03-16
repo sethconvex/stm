@@ -116,8 +116,8 @@ async function confirmOrCancelProvider(
 // ═══════════════════════════════════════════════════════════════════════
 
 export const placeOrder = mutation({
-  args: { items: v.array(v.string()) },
-  handler: async (ctx, { items }) => {
+  args: { items: v.array(v.string()), timeoutMs: v.optional(v.number()) },
+  handler: async (ctx, { items, timeoutMs }) => {
     const orderId = await ctx.db.insert("orders", {
       items, status: "pending", attempts: [],
     });
@@ -130,8 +130,26 @@ export const placeOrder = mutation({
       }
     }
 
+    // Optional order-level timeout: if not ALL items are fulfilled
+    // within timeoutMs, cancel the entire order. Atomic guarantee.
+    if (timeoutMs) {
+      await ctx.scheduler.runAfter(timeoutMs, internal.example.expireOrder, {
+        orderId: orderId as string,
+      });
+    }
+
     await runFulfillment(ctx, orderId, items);
     return orderId;
+  },
+});
+
+// If the order isn't fulfilled by the deadline, cancel everything.
+export const expireOrder = internalMutation({
+  args: { orderId: v.string() },
+  handler: async (ctx, { orderId }) => {
+    const order = await ctx.db.get(orderId as any);
+    if (!order || order.status === "fulfilled" || order.status === "expired") return; // already done
+    await ctx.db.patch(order._id, { status: "expired" as any });
   },
 });
 
@@ -141,7 +159,7 @@ export const placeOrder = mutation({
 
 async function runFulfillment(ctx: any, orderId: any, items: string[]) {
   const order = await ctx.db.get(orderId);
-  if (!order || order.status === "fulfilled") return;
+  if (!order || order.status === "fulfilled" || order.status === "expired") return;
 
   const result = await stm.atomic(
     ctx,

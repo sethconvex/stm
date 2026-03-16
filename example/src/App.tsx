@@ -250,6 +250,7 @@ function ProviderStatus() {
 function OrderForm() {
   const placeOrder = useMutation(api.example.placeOrder);
   const [cart, setCart] = useState<Set<string>>(new Set(["shirt"]));
+  const [timeout, setTimeout] = useState(false);
   const toggleItem = (item: string) => {
     setCart((prev) => { const n = new Set(prev); if (n.has(item)) n.delete(item); else n.add(item); return n; });
   };
@@ -265,7 +266,16 @@ function OrderForm() {
           </button>
         ))}
       </div>
-      <button onClick={() => placeOrder({ items: [...cart] })} disabled={cart.size === 0}>
+      <div className="timeout-row">
+        <label className="timeout-toggle">
+          <input type="checkbox" checked={timeout} onChange={(e) => setTimeout(e.target.checked)} />
+          <span>3s order timeout</span>
+        </label>
+        <span className="timeout-hint">
+          {timeout ? "Cancel entire order if not fulfilled in 3s" : "No deadline"}
+        </span>
+      </div>
+      <button onClick={() => placeOrder({ items: [...cart], timeoutMs: timeout ? 3000 : undefined })} disabled={cart.size === 0}>
         Order {[...cart].join(" + ")}
       </button>
     </div>

@@ -8,6 +8,7 @@ export default defineSchema({
       v.literal("pending"),
       v.literal("submitted"),
       v.literal("fulfilled"),
+      v.literal("expired"),
     ),
     assignments: v.optional(v.any()),
     attempts: v.array(
