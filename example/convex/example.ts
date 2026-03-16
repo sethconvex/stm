@@ -40,25 +40,32 @@ async function raceProviders(tx: TX, orderId: string, item: string) {
 
   // Submit to ALL capable providers simultaneously
   const toSubmit: string[] = [];
+  let anyPending = false;
   for (const p of providers) {
     const available = await tx.read(`provider:${p}:available`);
     if (!available) continue;
 
     const status = await tx.read(`order:${orderId}:${item}:${p}`);
-    if (status === null) {
+    if (status === null || status === "rejected" || status === "canceled") {
+      // Not yet submitted, or previously rejected — (re)submit
       tx.write(`order:${orderId}:${item}:${p}`, "submitted");
       toSubmit.push(p);
+    } else if (status === "submitted") {
+      anyPending = true; // still waiting on this one
     }
-    // "ready" = provider responded, waiting for us to confirm/cancel
-    // (handled in the webhook)
   }
 
-  // If we submitted new providers, return the list for action dispatch
   if (toSubmit.length > 0) {
     return { next: "submit-all" as const, item, providers: toSubmit };
   }
 
-  // All submitted, none accepted yet — wait for a response
+  if (anyPending) {
+    // Some providers still processing — wait for response
+    tx.retry();
+  }
+
+  // All available providers rejected and none pending — wait for a
+  // provider to come back online (availability TVar is in read set)
   tx.retry();
 }
 

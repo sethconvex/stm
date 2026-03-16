@@ -103,6 +103,19 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 
 pre { margin: 0; overflow-x: auto; font-size: 0.72rem; line-height: 1.5; color: #888; }
 
+/* Emoji pops */
+.provider-card { position: relative; overflow: visible; }
+.pop-container { position: absolute; top: 0; left: 50%; pointer-events: none; z-index: 10; }
+.pop-emoji {
+  position: absolute; font-size: 1.8rem;
+  animation: pop-up 1.5s ease-out forwards;
+  left: -0.9rem;
+}
+@keyframes pop-up {
+  0% { opacity: 1; transform: translateY(0) scale(1); }
+  100% { opacity: 0; transform: translateY(-60px) scale(1.4); }
+}
+
 /* ── Walkthrough ───────────────────────────────────── */
 .walkthrough {
   background: linear-gradient(145deg, #111128, #0f0f1e);

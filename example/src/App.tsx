@@ -1,7 +1,15 @@
 import "./App.css";
 import { useMutation, useQuery } from "convex/react";
 import { api } from "../convex/_generated/api";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
+
+function useDebouncedCallback<T extends (...args: any[]) => any>(fn: T, ms: number): T {
+  const timer = useRef<ReturnType<typeof window.setTimeout>>();
+  return useCallback((...args: any[]) => {
+    clearTimeout(timer.current);
+    timer.current = window.setTimeout(() => fn(...args), ms);
+  }, [fn, ms]) as any;
+}
 
 const PRODUCTS = [
   { key: "shirt", emoji: "\uD83D\uDC55" },
@@ -33,13 +41,13 @@ const STEPS = [
   },
   {
     title: "Order a shirt",
-    body: "All providers online, 0% failure. Printful is tried first (it makes shirts). Watch the order go pending \u2192 submitted \u2192 fulfilled.",
+    body: "All providers online, 0% failure. We race all capable providers simultaneously. First to accept wins.",
     action: { type: "order" as const, items: ["shirt"] },
     setup: ALL_ON,
   },
   {
     title: "Printful always rejects",
-    body: "Printful at 100% failure. Order a shirt \u2014 Printful rejects, STM automatically cascades to Printify.",
+    body: "Printful at 100% failure. Both Printful and Printify get the request, but Printful rejects. Printify wins by default.",
     action: { type: "order" as const, items: ["shirt"] },
     setup: {
       printful: { online: true, rate: 100, timeout: 5000 },
@@ -48,18 +56,14 @@ const STEPS = [
     },
   },
   {
-    title: "Split across providers",
-    body: "Shirt + mug + poster. No single provider makes all three. With Printful rejecting: shirt \u2192 Printify, mug \u2192 Gooten, poster \u2192 Printify or Gooten. All atomic.",
+    title: "Full catalog",
+    body: "Shirt + mug + poster. No single provider makes all three. All providers are raced per item. First to accept each item wins. The whole cart completes atomically.",
     action: { type: "order" as const, items: ["shirt", "mug", "poster"] },
-    setup: {
-      printful: { online: true, rate: 100, timeout: 5000 },
-      printify: { online: true, rate: 0, timeout: 5000 },
-      gooten:   { online: true, rate: 0, timeout: 5000 },
-    },
+    setup: ALL_ON,
   },
   {
-    title: "Printful is offline",
-    body: "Printful is completely offline \u2014 not even tried. Shirts can only come from Printify, mugs from Gooten. Order shirt + mug and watch it route around.",
+    title: "Printful offline",
+    body: "Printful completely offline. Shirts can only come from Printify, mugs only from Gooten.",
     action: { type: "order" as const, items: ["shirt", "mug"] },
     setup: {
       printful: { online: false, rate: 0, timeout: 5000 },
@@ -68,32 +72,24 @@ const STEPS = [
     },
   },
   {
-    title: "We stop waiting",
-    body: "All online, but we only wait 1s for Printful. Providers take 1-5s to respond \u2014 so Printful often times out (\u23F1) and we move on to the next provider. The provider doesn't know we gave up.",
-    action: { type: "order" as const, items: ["shirt", "mug"] },
-    setup: {
-      printful: { online: true, rate: 0, timeout: 1000 },
-      printify: { online: true, rate: 0, timeout: 5000 },
-      gooten:   { online: true, rate: 0, timeout: 5000 },
-    },
-  },
-  {
     title: "Chaos mode",
-    body: "All providers: 60% failure, 2s timeout. Orders bounce between providers, timing out and retrying. Watch the attempt badges pile up. Despite the chaos, every order eventually ships.",
+    body: "All providers: 60% failure. We race them all, but most reject. Watch the providers light up as they accept items one by one.",
     action: { type: "order" as const, items: ["shirt", "mug", "poster"] },
     setup: {
-      printful: { online: true, rate: 60, timeout: 2000 },
-      printify: { online: true, rate: 60, timeout: 2000 },
-      gooten:   { online: true, rate: 60, timeout: 2000 },
+      printful: { online: true, rate: 60, timeout: 5000 },
+      printify: { online: true, rate: 60, timeout: 5000 },
+      gooten:   { online: true, rate: 60, timeout: 5000 },
     },
   },
   {
     title: "The code",
-    body: "Routing, failover, timeouts, retries, atomic multi-item carts \u2014 all handled by a select() per item inside one atomic transaction. No state machines. No event plumbing.",
+    body: "Race all providers, first to accept wins. Atomic winner selection via one TVar write. Idempotent on retry. No double-ordering.",
     action: null,
     setup: ALL_ON,
   },
 ];
+
+// ── Walkthrough ───────────────────────────────────────────────────────
 
 function Walkthrough({
   onOrder,
@@ -119,23 +115,11 @@ function Walkthrough({
     }
   };
 
-  // Apply setup on mount for step 0
   useEffect(() => {
-    if (!applied) {
-      applySetup(STEPS[0]);
-      setApplied(true);
-    }
+    if (!applied) { applySetup(STEPS[0]); setApplied(true); }
   }, [applied]);
 
-  const goTo = (i: number) => {
-    applySetup(STEPS[i]);
-    setStep(i);
-  };
-
-  const doAction = () => {
-    if (!current.action) return;
-    if (current.action.type === "order") onOrder(current.action.items!);
-  };
+  const goTo = (i: number) => { applySetup(STEPS[i]); setStep(i); };
 
   return (
     <div className="walkthrough">
@@ -147,10 +131,8 @@ function Walkthrough({
       <div className="walk-actions">
         <button className="walk-btn secondary" onClick={() => goTo(Math.max(0, step - 1))} disabled={step === 0}>Back</button>
         {current.action && (
-          <button className="walk-btn primary" onClick={doAction}>
-            {current.action.type === "order"
-              ? `Order ${current.action.items!.join(" + ")}`
-              : `Toggle ${current.action.provider}`}
+          <button className="walk-btn primary" onClick={() => onOrder(current.action!.items!)}>
+            Order {current.action.items!.join(" + ")}
           </button>
         )}
         <button className="walk-btn secondary" onClick={() => goTo(Math.min(STEPS.length - 1, step + 1))} disabled={step === STEPS.length - 1}>Next</button>
@@ -158,6 +140,84 @@ function Walkthrough({
       <div className="walk-dots">
         {STEPS.map((_, i) => (
           <span key={i} className={`walk-dot ${i === step ? "active" : ""}`} onClick={() => goTo(i)} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── Provider cards with emoji pop ─────────────────────────────────────
+
+function ProviderCard({ name, info, onToggle, onSetRate, onSetTimeout }: {
+  name: string;
+  info: { available: boolean; products: string[]; failRate: number; timeout: number };
+  onToggle: () => void;
+  onSetRate: (rate: number) => void;
+  onSetTimeout: (timeout: number) => void;
+}) {
+  const orders = useQuery(api.example.listOrders) ?? [];
+  const [pops, setPops] = useState<{ id: number; emoji: string }[]>([]);
+  const prevAttemptsRef = useRef<number>(0);
+
+  // Local slider state for instant feedback
+  const [localRate, setLocalRate] = useState(info.failRate);
+  const [localTimeout, setLocalTimeout] = useState(info.timeout);
+  useEffect(() => { setLocalRate(info.failRate); }, [info.failRate]);
+  useEffect(() => { setLocalTimeout(info.timeout); }, [info.timeout]);
+
+  const debouncedSetRate = useDebouncedCallback(onSetRate, 300);
+  const debouncedSetTimeout = useDebouncedCallback(onSetTimeout, 300);
+
+  // Watch for new "accepted" attempts → pop emoji
+  useEffect(() => {
+    const allAttempts = orders.flatMap((o) =>
+      (o.attempts as any[]).filter(
+        (a) => a.provider === name && a.result === "accepted",
+      ),
+    );
+    if (allAttempts.length > prevAttemptsRef.current) {
+      const newOnes = allAttempts.slice(prevAttemptsRef.current);
+      for (const a of newOnes) {
+        const emoji = PRODUCTS.find((p) => p.key === a.item)?.emoji ?? "?";
+        const id = Date.now() + Math.random();
+        setPops((prev) => [...prev, { id, emoji }]);
+        window.setTimeout(() => setPops((prev) => prev.filter((p) => p.id !== id)), 1500);
+      }
+    }
+    prevAttemptsRef.current = allAttempts.length;
+  }, [orders, name]);
+
+  return (
+    <div className={`provider-card ${info.available ? "online" : "offline"}`} style={{ borderColor: info.available ? PROVIDER_COLORS[name] : "#333" }}>
+      <div className="provider-top" onClick={onToggle}>
+        <span className="provider-dot" style={{ background: info.available ? PROVIDER_COLORS[name] : "#555" }} />
+        <span className="provider-name">{name}</span>
+        <span className="provider-products">
+          {info.products.map((pr) => PRODUCTS.find((x) => x.key === pr)?.emoji).join(" ")}
+        </span>
+        <span className="provider-status">{info.available ? "online" : "offline"}</span>
+      </div>
+      {info.available && (
+        <div className="sliders">
+          <div className="slider-row">
+            <span className="slider-label">Fail</span>
+            <input type="range" min={0} max={100} value={localRate}
+              onChange={(e) => { const v = Number(e.target.value); setLocalRate(v); debouncedSetRate(v); }}
+              style={{ accentColor: PROVIDER_COLORS[name] }} />
+            <span className="slider-value">{localRate}%</span>
+          </div>
+          <div className="slider-row">
+            <span className="slider-label">Wait</span>
+            <input type="range" min={500} max={10000} step={500} value={localTimeout}
+              onChange={(e) => { const v = Number(e.target.value); setLocalTimeout(v); debouncedSetTimeout(v); }}
+              style={{ accentColor: PROVIDER_COLORS[name] }} />
+            <span className="slider-value">{(localTimeout / 1000).toFixed(1)}s</span>
+          </div>
+        </div>
+      )}
+      <div className="pop-container">
+        {pops.map((p) => (
+          <span key={p.id} className="pop-emoji">{p.emoji}</span>
         ))}
       </div>
     </div>
@@ -172,47 +232,25 @@ function ProviderStatus() {
 
   return (
     <div className="providers">
-      {Object.entries(providers).map(([name, info]) => {
-        const p = info as { available: boolean; products: string[]; failRate: number; timeout: number };
-        return (
-          <div key={name} className={`provider-card ${p.available ? "online" : "offline"}`} style={{ borderColor: p.available ? PROVIDER_COLORS[name] : "#333" }}>
-            <div className="provider-top" onClick={() => toggle({ provider: name })}>
-              <span className="provider-dot" style={{ background: p.available ? PROVIDER_COLORS[name] : "#555" }} />
-              <span className="provider-name">{name}</span>
-              <span className="provider-products">
-                {p.products.map((pr) => PRODUCTS.find((x) => x.key === pr)?.emoji).join(" ")}
-              </span>
-              <span className="provider-status">{p.available ? "online" : "offline"}</span>
-            </div>
-            {p.available && (
-              <div className="sliders">
-                <div className="slider-row">
-                  <span className="slider-label">Fail</span>
-                  <input type="range" min={0} max={100} value={p.failRate}
-                    onChange={(e) => setRate({ provider: name, rate: Number(e.target.value) })}
-                    style={{ accentColor: PROVIDER_COLORS[name] }} />
-                  <span className="slider-value">{p.failRate}%</span>
-                </div>
-                <div className="slider-row">
-                  <span className="slider-label">Wait</span>
-                  <input type="range" min={500} max={10000} step={500} value={p.timeout}
-                    onChange={(e) => setTO({ provider: name, timeout: Number(e.target.value) })}
-                    style={{ accentColor: PROVIDER_COLORS[name] }} />
-                  <span className="slider-value">{(p.timeout / 1000).toFixed(1)}s</span>
-                </div>
-              </div>
-            )}
-          </div>
-        );
-      })}
+      {Object.entries(providers).map(([name, info]) => (
+        <ProviderCard
+          key={name}
+          name={name}
+          info={info as any}
+          onToggle={() => toggle({ provider: name })}
+          onSetRate={(rate) => setRate({ provider: name, rate })}
+          onSetTimeout={(timeout) => setTO({ provider: name, timeout })}
+        />
+      ))}
     </div>
   );
 }
 
+// ── Order form + feed ─────────────────────────────────────────────────
+
 function OrderForm() {
   const placeOrder = useMutation(api.example.placeOrder);
   const [cart, setCart] = useState<Set<string>>(new Set(["shirt"]));
-
   const toggleItem = (item: string) => {
     setCart((prev) => { const n = new Set(prev); if (n.has(item)) n.delete(item); else n.add(item); return n; });
   };
@@ -264,7 +302,7 @@ function OrderFeed() {
             <div className="attempts">
               {o.attempts.map((a: any, i: number) => (
                 <span key={i} className={`attempt ${a.result}`}>
-                  {PRODUCTS.find((p) => p.key === a.item)?.emoji}{a.provider}:{a.result === "accepted" ? "\u2713" : a.result === "timeout" ? "\u23F1" : "\u2717"}
+                  {PRODUCTS.find((p) => p.key === a.item)?.emoji}{a.provider}:{a.result === "accepted" ? "\u2713" : a.result === "canceled" ? "\u2718" : a.result === "timeout" ? "\u23F1" : "\u2717"}
                 </span>
               ))}
             </div>
@@ -275,10 +313,11 @@ function OrderFeed() {
   );
 }
 
+// ── App layout ────────────────────────────────────────────────────────
+
 function App() {
   const setup = useMutation(api.example.setup);
   const placeOrder = useMutation(api.example.placeOrder);
-  const toggle = useMutation(api.example.toggleProvider);
   const setRate = useMutation(api.example.setFailRate);
   const setTO = useMutation(api.example.setTimeout);
   const setAvail = useMutation(api.example.setAvailable);
@@ -286,7 +325,7 @@ function App() {
   return (
     <div className="app">
       <h1>Convex STM</h1>
-      <p className="subtitle">Multi-item fulfillment with failover, timeouts, and retries</p>
+      <p className="subtitle">Multi-item fulfillment &mdash; race providers, first to accept wins</p>
 
       <Walkthrough
         onOrder={(items) => placeOrder({ items })}
@@ -297,46 +336,39 @@ function App() {
 
       <div className="two-col">
         <div className="col-left">
-          <ProviderStatus />
           <OrderForm />
           <button className="reset-btn" onClick={() => setup({})}>Reset</button>
           <div className="panel code">
             <h2>The code</h2>
-            <pre>{`// 1. Submit to ALL providers for each item simultaneously.
-async function raceProviders(tx, orderId, item) {
-  // Already have a winner?
-  const winner = await tx.read(\`order:\${orderId}:\${item}:winner\`);
-  if (winner) return { done: true, provider: winner };
-
-  // Submit to every available provider at once
-  for (const p of providersFor(item)) {
-    if (!await tx.read(\`provider:\${p}:available\`)) continue;
-    if (await tx.read(\`order:\${orderId}:\${item}:\${p}\`) === null)
-      tx.write(\`order:\${orderId}:\${item}:\${p}\`, "submitted");
-  }
-  tx.retry();  // wait for first response
-}
-
-// 2. When a provider responds "ready", we atomically confirm or cancel.
-//    First to arrive wins. Idempotent — same answer on retry.
-async function confirmOrCancel(tx, orderId, item, provider) {
-  const winner = await tx.read(\`order:\${orderId}:\${item}:winner\`);
-  if (winner === provider) return "CONFIRM";  // you already won
-  if (winner)              return "CANCEL";   // someone else won
-  tx.write(\`order:\${orderId}:\${item}:winner\`, provider);
-  return "CONFIRM";  // you're first!
-}
-
-// 3. Fulfill the whole cart — every item races its providers.
-//    All items must have a winner or the order waits.
+            <pre>{`// Race ALL providers per item. First to accept wins.
 await stm.atomic(ctx, async (tx) => {
   for (const item of cart) {
-    await raceProviders(tx, orderId, item);
+    const winner = await tx.read(\`order:\${id}:\${item}:winner\`);
+    if (winner) continue;  // already have a winner
+
+    // Submit to every available provider at once
+    for (const p of providersFor(item)) {
+      if (!await tx.read(\`provider:\${p}:available\`)) continue;
+      if (await tx.read(\`order:\${id}:\${item}:\${p}\`) === null)
+        tx.write(\`order:\${id}:\${item}:\${p}\`, "submitted");
+    }
+    tx.retry();  // wait for first response
   }
-});`}</pre>
+});
+
+// Provider webhook: atomically pick a winner
+await stm.atomic(ctx, async (tx) => {
+  const winner = await tx.read(\`order:\${id}:\${item}:winner\`);
+  if (winner === provider) return "CONFIRM";
+  if (winner)              return "CANCEL";
+  tx.write(\`order:\${id}:\${item}:winner\`, provider);
+  return "CONFIRM";  // you're first!
+});
+// Idempotent. Call it 10 times, same answer.`}</pre>
           </div>
         </div>
         <div className="col-right">
+          <ProviderStatus />
           <OrderFeed />
         </div>
       </div>
