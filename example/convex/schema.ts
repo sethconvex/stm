@@ -22,6 +22,13 @@ export default defineSchema({
     ),
   }),
 
+  // Priority queue demo: processed jobs log
+  processedJobs: defineTable({
+    queue: v.string(),
+    job: v.string(),
+    at: v.number(),
+  }),
+
   // Mock provider settings — NOT TVars. These belong to the "external"
   // providers, not to the STM system. In production these would be in
   // the provider's own database.

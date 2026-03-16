@@ -405,6 +405,131 @@ function CodeBlock() {
   );
 }
 
+// ── Priority Queue Demo ───────────────────────────────────────────────
+
+const QUEUE_COLORS: Record<string, string> = {
+  critical: "#ef4444",
+  normal: "#3b82f6",
+  bulk: "#888",
+};
+
+const QUEUE_LABELS: Record<string, string> = {
+  critical: "\uD83D\uDD34 Critical",
+  normal: "\uD83D\uDD35 Normal",
+  bulk: "\u26AA Bulk",
+};
+
+const JOB_NAMES = ["deploy", "backup", "report", "sync", "migrate", "audit", "notify", "index", "compress", "validate"];
+
+function QueueDemo() {
+  const queues = useQuery(api.queue.readQueues) ?? { critical: [], normal: [], bulk: [] };
+  const processed = useQuery(api.queue.readProcessed) ?? [];
+  const enqueue = useMutation(api.queue.enqueue);
+  const dequeue = useMutation(api.queue.dequeue);
+  const setupQ = useMutation(api.queue.setupQueues);
+  const [generating, setGenerating] = useState(false);
+  const genRef = useRef(false);
+
+  const randomJob = () => JOB_NAMES[Math.floor(Math.random() * JOB_NAMES.length)];
+  const randomQueue = () => ["critical", "normal", "normal", "bulk", "bulk", "bulk"][Math.floor(Math.random() * 6)];
+
+  const startGenerating = () => {
+    setGenerating(true);
+    genRef.current = true;
+    const tick = () => {
+      if (!genRef.current) return;
+      enqueue({ queue: randomQueue(), job: randomJob() });
+      window.setTimeout(tick, 300 + Math.random() * 700);
+    };
+    tick();
+  };
+
+  const stopGenerating = () => {
+    setGenerating(false);
+    genRef.current = false;
+  };
+
+  return (
+    <div>
+      <div className="queue-controls">
+        <button onClick={() => setupQ({})}>Reset Queues</button>
+        <button onClick={() => enqueue({ queue: "critical", job: randomJob() })}>+ Critical</button>
+        <button onClick={() => enqueue({ queue: "normal", job: randomJob() })}>+ Normal</button>
+        <button onClick={() => enqueue({ queue: "bulk", job: randomJob() })}>+ Bulk</button>
+        <button onClick={() => dequeue({})}>Take Next</button>
+        {generating
+          ? <button className="stop-btn" onClick={stopGenerating}>Stop Load</button>
+          : <button onClick={startGenerating}>Generate Load</button>
+        }
+      </div>
+
+      <div className="queue-pipes">
+        {(["critical", "normal", "bulk"] as const).map((q) => (
+          <div key={q} className="queue-pipe" style={{ borderColor: QUEUE_COLORS[q] }}>
+            <div className="pipe-header">
+              <span>{QUEUE_LABELS[q]}</span>
+              <span className="pipe-count">{queues[q]?.length ?? 0}</span>
+            </div>
+            <div className="pipe-items">
+              {(queues[q] ?? []).map((job, i) => (
+                <span key={i} className="pipe-item" style={{ background: QUEUE_COLORS[q] + "22", borderColor: QUEUE_COLORS[q] }}>
+                  {job}
+                </span>
+              ))}
+              {(queues[q] ?? []).length === 0 && <span className="pipe-empty">empty</span>}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="pipe-arrow">{"\u2193"} select(critical, normal, bulk)</div>
+
+      <div className="processed">
+        <h3>Processed</h3>
+        {processed.map((j: any) => (
+          <span key={j._id} className="processed-item" style={{ borderColor: QUEUE_COLORS[j.queue] }}>
+            {j.job}
+            <span className="processed-queue" style={{ color: QUEUE_COLORS[j.queue] }}>{j.queue}</span>
+          </span>
+        ))}
+        {processed.length === 0 && <span className="pipe-empty">none yet</span>}
+      </div>
+
+      <div className="panel code">
+        <h2>The code</h2>
+        <pre><code className="language-typescript">{`// Worker takes from highest-priority non-empty queue.
+// select() tries each — first one with items wins.
+// If ALL empty, blocks until any queue gets a job.
+
+await stm.atomic(ctx, async (tx) => {
+  return await tx.select(
+    async () => ({
+      queue: "critical",
+      job: await queueShift(tx, "critical"),
+    }),
+    async () => ({
+      queue: "normal",
+      job: await queueShift(tx, "normal"),
+    }),
+    async () => ({
+      queue: "bulk",
+      job: await queueShift(tx, "bulk"),
+    }),
+  );
+});
+
+// queueShift: take the first item, or retry if empty
+async function queueShift(tx, queue) {
+  const items = await tx.read(\`queue:\${queue}\`);
+  if (items.length === 0) tx.retry();
+  tx.write(\`queue:\${queue}\`, items.slice(1));
+  return items[0];
+}`}</code></pre>
+      </div>
+    </div>
+  );
+}
+
 // ── App layout ────────────────────────────────────────────────────────
 
 function App() {
@@ -412,32 +537,49 @@ function App() {
   const placeOrder = useMutation(api.example.placeOrder);
   const setAvail = useMutation(api.example.setAvailable);
   const setSettings = useMutation(api.mockProviders.settings.set);
+  const [tab, setTab] = useState<"fulfillment" | "queue">("fulfillment");
 
   return (
     <div className="app">
       <h1>Convex STM</h1>
-      <p className="subtitle">Multi-item fulfillment &mdash; race providers, first to accept wins</p>
 
-      <Walkthrough
-        onOrder={(items, timeoutMs) => placeOrder({ items, timeoutMs })}
-        onSetRate={(p, r) => setSettings({ provider: p, failRate: r })}
-        onSetMaxDelay={(p, t) => setSettings({ provider: p, maxDelay: t })}
-        onSetAvailable={(p, a) => setAvail({ provider: p, available: a })}
-        onReset={() => setup({})}
-      />
-
-      <div className="two-col">
-        <div className="col-left">
-          <OrderForm />
-          <button className="reset-btn" onClick={() => setup({})}>Reset</button>
-          <CodeBlock />
-
-        </div>
-        <div className="col-right">
-          <ProviderStatus />
-          <OrderFeed />
-        </div>
+      <div className="tabs">
+        <button className={`tab ${tab === "fulfillment" ? "active" : ""}`} onClick={() => setTab("fulfillment")}>
+          Fulfillment
+        </button>
+        <button className={`tab ${tab === "queue" ? "active" : ""}`} onClick={() => setTab("queue")}>
+          Priority Queue
+        </button>
       </div>
+
+      {tab === "fulfillment" ? (
+        <>
+          <p className="subtitle">Race providers, first to accept wins</p>
+          <Walkthrough
+            onOrder={(items, timeoutMs) => placeOrder({ items, timeoutMs })}
+            onSetRate={(p, r) => setSettings({ provider: p, failRate: r })}
+            onSetMaxDelay={(p, t) => setSettings({ provider: p, maxDelay: t })}
+            onSetAvailable={(p, a) => setAvail({ provider: p, available: a })}
+            onReset={() => setup({})}
+          />
+          <div className="two-col">
+            <div className="col-left">
+              <OrderForm />
+              <button className="reset-btn" onClick={() => setup({})}>Reset</button>
+              <CodeBlock />
+            </div>
+            <div className="col-right">
+              <ProviderStatus />
+              <OrderFeed />
+            </div>
+          </div>
+        </>
+      ) : (
+        <>
+          <p className="subtitle">select() from priority queues — highest non-empty wins</p>
+          <QueueDemo />
+        </>
+      )}
     </div>
   );
 }
