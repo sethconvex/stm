@@ -1,0 +1,248 @@
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, sans-serif;
+  background: #0a0a0f;
+  color: #e0e0e0;
+}
+.app {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 2rem 1.5rem;
+}
+h1 {
+  text-align: center;
+  font-size: 1.8rem;
+  margin-bottom: 0.25rem;
+  background: linear-gradient(135deg, #ffd700, #c0c0c0, #cd7f32);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+.subtitle {
+  text-align: center;
+  color: #666;
+  margin-bottom: 2rem;
+  font-size: 0.9rem;
+}
+.subtitle code {
+  color: #ffd700;
+  background: rgba(255, 215, 0, 0.08);
+  padding: 0.1em 0.4em;
+  border-radius: 4px;
+}
+
+/* ── Resources ──────────────────────────────────────────── */
+.resources {
+  background: #111118;
+  border: 1px solid #222;
+  border-radius: 12px;
+  padding: 1.25rem;
+  margin-bottom: 1rem;
+}
+.resource-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.6rem;
+}
+.resource-row:last-of-type {
+  margin-bottom: 0;
+}
+.resource-label {
+  width: 80px;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+.bar-track {
+  flex: 1;
+  height: 24px;
+  background: #1a1a2e;
+  border-radius: 6px;
+  overflow: hidden;
+}
+.bar-fill {
+  height: 100%;
+  border-radius: 6px;
+  transition: width 0.3s ease;
+}
+.resource-value {
+  width: 48px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  font-size: 0.95rem;
+}
+
+/* ── Invariant ──────────────────────────────────────────── */
+.invariant {
+  margin-top: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 8px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.invariant.ok {
+  background: rgba(34, 197, 94, 0.1);
+  border: 1px solid rgba(34, 197, 94, 0.3);
+  color: #22c55e;
+}
+.invariant.broken {
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  color: #ef4444;
+}
+
+/* ── Reset ──────────────────────────────────────────────── */
+.reset-btn {
+  display: block;
+  margin: 0 auto 1.5rem;
+  padding: 0.4rem 1.5rem;
+  background: transparent;
+  border: 1px solid #333;
+  color: #666;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 0.8rem;
+  transition: all 0.2s;
+}
+.reset-btn:hover {
+  border-color: #888;
+  color: #aaa;
+}
+
+/* ── Panels ─────────────────────────────────────────────── */
+.panel {
+  background: #111118;
+  border: 1px solid #222;
+  border-radius: 12px;
+  padding: 1.25rem;
+  margin-bottom: 1rem;
+}
+.panel.highlight {
+  border-color: rgba(255, 215, 0, 0.3);
+}
+.panel.stress {
+  border-color: rgba(239, 68, 68, 0.3);
+}
+.panel.code {
+  border-color: #333;
+}
+.panel h2 {
+  font-size: 1rem;
+  margin: 0 0 0.25rem 0;
+}
+.hint {
+  color: #666;
+  font-size: 0.82rem;
+  margin: 0 0 1rem 0;
+  line-height: 1.5;
+}
+
+/* ── Forms ──────────────────────────────────────────────── */
+.row {
+  display: flex;
+  gap: 0.75rem;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+.row label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.75rem;
+  color: #888;
+}
+.input-pair {
+  display: flex;
+  gap: 0.4rem;
+}
+.row select,
+.row input[type="number"] {
+  padding: 0.5rem 0.6rem;
+  background: #0a0a0f;
+  border: 1px solid #333;
+  border-radius: 6px;
+  color: #e0e0e0;
+  font-size: 0.9rem;
+  width: 80px;
+}
+.row select {
+  width: auto;
+}
+.row select:focus,
+.row input:focus {
+  outline: none;
+  border-color: #ffd700;
+}
+.arrow {
+  font-size: 1.4rem;
+  color: #444;
+  padding-bottom: 0.3rem;
+}
+button:not(.reset-btn) {
+  padding: 0.5rem 1.25rem;
+  background: linear-gradient(135deg, #ffd700, #f59e0b);
+  border: none;
+  border-radius: 6px;
+  color: #0a0a0f;
+  font-weight: 700;
+  cursor: pointer;
+  font-size: 0.9rem;
+  transition: opacity 0.2s;
+  white-space: nowrap;
+}
+button:not(.reset-btn):hover {
+  opacity: 0.85;
+}
+button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.status {
+  margin-top: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  background: rgba(255, 215, 0, 0.06);
+  border: 1px solid rgba(255, 215, 0, 0.2);
+  border-radius: 6px;
+  font-size: 0.85rem;
+  color: #ffd700;
+}
+
+/* ── Stress test ────────────────────────────────────────── */
+.stress button {
+  background: linear-gradient(135deg, #ef4444, #dc2626);
+  color: white;
+}
+.stress-results {
+  margin-top: 0.75rem;
+  padding: 0.75rem;
+  background: rgba(239, 68, 68, 0.06);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  border-radius: 6px;
+  font-size: 0.82rem;
+  color: #ccc;
+  line-height: 1.6;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Code ───────────────────────────────────────────────── */
+pre {
+  margin: 0;
+  overflow-x: auto;
+  font-size: 0.78rem;
+  line-height: 1.6;
+  color: #999;
+}
+
+.footer {
+  text-align: center;
+  color: #444;
+  font-size: 0.8rem;
+  margin-top: 2rem;
+  line-height: 1.6;
+}
