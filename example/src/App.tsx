@@ -302,35 +302,38 @@ function App() {
           <button className="reset-btn" onClick={() => setup({})}>Reset</button>
           <div className="panel code">
             <h2>The code</h2>
-            <pre>{`// 1. One function tries one provider for one item.
-//    It doesn't know about carts, timeouts, or other providers.
-async function tryProvider(tx, orderId, item, provider) {
-  const available = await tx.read(\`provider:\${provider}:available\`);
-  if (!available) tx.retry();  // offline — skip, watch for change
+            <pre>{`// 1. Submit to ALL providers for each item simultaneously.
+async function raceProviders(tx, orderId, item) {
+  // Already have a winner?
+  const winner = await tx.read(\`order:\${orderId}:\${item}:winner\`);
+  if (winner) return { done: true, provider: winner };
 
-  const result = await tx.read(\`order:\${orderId}:\${item}:\${provider}\`);
-  if (result === null)       { tx.write(..., "submitted"); return provider; }
-  if (result === "submitted")  tx.retry();   // waiting for API response
-  if (result === "accepted")   return provider;
-  tx.retry();  // rejected or timed out — try next
+  // Submit to every available provider at once
+  for (const p of providersFor(item)) {
+    if (!await tx.read(\`provider:\${p}:available\`)) continue;
+    if (await tx.read(\`order:\${orderId}:\${item}:\${p}\`) === null)
+      tx.write(\`order:\${orderId}:\${item}:\${p}\`, "submitted");
+  }
+  tx.retry();  // wait for first response
 }
 
-// 2. For each cart item, try capable providers with a timeout.
-//    "Wait up to 3s for Printful. If no response, try Printify."
+// 2. When a provider responds "ready", we atomically confirm or cancel.
+//    First to arrive wins. Idempotent — same answer on retry.
+async function confirmOrCancel(tx, orderId, item, provider) {
+  const winner = await tx.read(\`order:\${orderId}:\${item}:winner\`);
+  if (winner === provider) return "CONFIRM";  // you already won
+  if (winner)              return "CANCEL";   // someone else won
+  tx.write(\`order:\${orderId}:\${item}:winner\`, provider);
+  return "CONFIRM";  // you're first!
+}
+
+// 3. Fulfill the whole cart — every item races its providers.
+//    All items must have a winner or the order waits.
 await stm.atomic(ctx, async (tx) => {
   for (const item of cart) {
-    await tx.select(
-      ...providersFor(item).map(p => ({
-        fn: async () => await tryProvider(tx, orderId, item, p),
-        timeout: await tx.read(\`provider:\${p}:timeout\`),
-      })),
-    );
+    await raceProviders(tx, orderId, item);
   }
-});
-
-// 3. Providers respond via webhook → writes the TVar → wakes the order.
-//    If our timeout fires first, we've already moved to the next provider.
-//    The whole cart is atomic: all items succeed or the order waits.`}</pre>
+});`}</pre>
           </div>
         </div>
         <div className="col-right">
