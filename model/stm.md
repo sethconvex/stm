@@ -312,6 +312,31 @@ Wake calls scheduler.runAfter → workflow step checks if still relevant → no-
 └── tsconfig.json
 ```
 
+## Coverage of the Paper
+
+| Paper Concept | Status | How |
+|---|---|---|
+| TVar (transactional variable) | ✓ | String keys in component `tvars` table |
+| readTVar / writeTVar | ✓ | `tx.read()` / `tx.write()` — async, on-demand |
+| atomic | ✓ | `stm.atomic(ctx, handler)` |
+| retry | ✓ | `tx.retry()` + waiter wake mechanism |
+| orElse | ✓ | `tx.orElse(fn1, fn2)` with write rollback |
+| Sequential composition | ✓ | `async/await` inside handler |
+| Exception abort semantics | ✓ | Throws discard buffered writes |
+| **No IO in transactions** | ✓ | **Convex enforces this.** Mutations can't call `fetch()`, `Math.random()`, or any non-deterministic IO. The paper uses Haskell's monadic type system to prevent IO inside STM. Convex's mutation/action split gives us the same guarantee at the platform level — no language-level type tricks needed. |
+| select (our addition) | ✓ | `tx.select()` = variadic orElse, with optional per-branch timeout |
+| Timeout (our addition) | ✓ | `{ fn, timeout }` branches in select — composable with retry and orElse |
+
+### Not implemented
+
+- **newTVar inside transactions.** The paper lets you allocate TVars inside a
+  transaction; allocations survive even on abort. We require `stm.init()` outside.
+- **tx.catch().** The paper supports catching exceptions within a transaction and
+  continuing. We only support exceptions propagating out (abort semantics).
+- **Nested transaction logs.** The paper's `orElse` uses genuine nested logs with
+  parent-chain lookups. We simulate with save/restore on a flat writeSet. Correct
+  behavior, different architecture.
+
 ## What This Doesn't Do
 
 - **No cross-mutation atomicity.** Each `stm.atomic()` call lives inside one Convex
