@@ -100,11 +100,13 @@ function Walkthrough({
   onSetRate,
   onSetMaxDelay,
   onSetAvailable,
+  onReset,
 }: {
   onOrder: (items: string[]) => void;
   onSetRate: (provider: string, rate: number) => void;
   onSetMaxDelay: (provider: string, maxDelay: number) => void;
   onSetAvailable: (provider: string, available: boolean) => void;
+  onReset: () => void;
 }) {
   const [step, setStep] = useState(0);
   const current = STEPS[step];
@@ -125,7 +127,11 @@ function Walkthrough({
     applySetup(STEPS[0]);
   }
 
-  const goTo = (i: number) => { applySetup(STEPS[i]); setStep(i); };
+  const goTo = (i: number) => {
+    onReset(); // clear stuck orders from previous step
+    applySetup(STEPS[i]);
+    setStep(i);
+  };
 
   return (
     <div className="walkthrough">
@@ -413,6 +419,7 @@ function App() {
         onSetRate={(p, r) => setSettings({ provider: p, failRate: r })}
         onSetMaxDelay={(p, t) => setSettings({ provider: p, maxDelay: t })}
         onSetAvailable={(p, a) => setAvail({ provider: p, available: a })}
+        onReset={() => setup({})}
       />
 
       <div className="two-col">
