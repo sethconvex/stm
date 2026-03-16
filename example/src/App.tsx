@@ -456,23 +456,43 @@ const result = await stm.atomic(ctx, async (tx) => {
 
 // committed  → every item has a winner → ship it
 // timedOut   → deadline passed → order expired
-// All items or nothing. No partial fulfillment.`;
+// All items or nothing. No partial fulfillment.
 
-function CodeBlock() {
-  const ref = useRef<HTMLElement>(null);
+// ── COMPOSABILITY ──────────────────────────────
+// Phase 1 and 2 are independent transactions that
+// compose through TVars:
+//
+//   Phase 1 WRITES "submitted"
+//     → afterCommit fires fetch()
+//       → provider webhooks back
+//         → webhook WRITES "accepted"
+//           → Phase 2 READS "accepted" → done
+//
+// Each piece is a plain function. They don't know
+// about each other. TVars are the glue.
+// retry() is the wait. select() is the fallback.
+// afterCommit() is the IO bridge.
+// timeout is the deadline. All composable.`;
+
+function HighlightedCode({ title, code }: { title: string; code: string }) {
+  const ref = useRef<HTMLPreElement>(null);
 
   useEffect(() => {
     if (ref.current && typeof Prism !== "undefined") {
       Prism.highlightAll();
     }
-  }, []);
+  }, [code]);
 
   return (
     <div className="panel code">
-      <h2>The code</h2>
-      <pre><code ref={ref} className="language-typescript">{CODE}</code></pre>
+      <h2>{title}</h2>
+      <pre ref={ref}><code className="language-typescript">{code}</code></pre>
     </div>
   );
+}
+
+function CodeBlock() {
+  return <HighlightedCode title="The code" code={CODE} />;
 }
 
 // ── Priority Queue Demo ───────────────────────────────────────────────
@@ -490,6 +510,61 @@ const QUEUE_LABELS: Record<string, string> = {
 };
 
 const JOB_NAMES = ["deploy", "backup", "report", "sync", "migrate", "audit", "notify", "index", "compress", "validate"];
+
+const QUEUE_CODE = `// ── TVars as queues ─────────────────────────────
+// Each queue is a TVar holding string[].
+// Producers push, consumers shift. All transactional.
+
+async function queuePush(tx, queue, job) {
+  const items = await tx.read(\`queue:\${queue}\`) ?? [];
+  tx.write(\`queue:\${queue}\`, [...items, job]);
+}
+
+async function queueShift(tx, queue) {
+  const items = await tx.read(\`queue:\${queue}\`) ?? [];
+  if (items.length === 0) tx.retry(); // ← blocks!
+  tx.write(\`queue:\${queue}\`, items.slice(1));
+  return items[0];
+}
+
+// ── Producer: push to any queue ─────────────────
+await stm.atomic(ctx, async (tx) => {
+  await queuePush(tx, "critical", "deploy-prod");
+});
+
+// ── Consumer: priority select ───────────────────
+// Tries critical first. If empty, tries normal.
+// Then bulk. If ALL empty, blocks on all three.
+// Multiple consumers are safe — atomic dequeue.
+
+await stm.atomic(ctx, async (tx) => {
+  return await tx.select(
+    async () => ({
+      queue: "critical",
+      job: await queueShift(tx, "critical"),
+    }),
+    async () => ({
+      queue: "normal",
+      job: await queueShift(tx, "normal"),
+    }),
+    async () => ({
+      queue: "bulk",
+      job: await queueShift(tx, "bulk"),
+    }),
+  );
+});
+
+// How select + retry compose:
+// 1. select tries queueShift("critical")
+// 2. critical is empty → retry() throws
+// 3. select catches it, tries "normal"
+// 4. normal has items → returns first one
+// 5. Transaction commits atomically
+//
+// If ALL queues empty: retry propagates up.
+// Transaction suspends. Resumes when ANY
+// queue TVar changes.`;
+
 
 function QueueDemo() {
   const queues = useQuery(api.queue.readQueues) ?? { critical: [], normal: [], bulk: [] };
@@ -624,63 +699,7 @@ function QueueDemo() {
         </div>
       </div>
 
-      <div className="panel code">
-        <h2>The code</h2>
-        <pre><code className="language-typescript">{`// ── TVars as queues ─────────────────────────────
-// Each queue is a TVar holding string[].
-// Producers push, consumers shift. All transactional.
-
-async function queuePush(tx, queue, job) {
-  const items = await tx.read(\`queue:\${queue}\`) ?? [];
-  tx.write(\`queue:\${queue}\`, [...items, job]);
-}
-
-async function queueShift(tx, queue) {
-  const items = await tx.read(\`queue:\${queue}\`) ?? [];
-  if (items.length === 0) tx.retry(); // ← blocks!
-  tx.write(\`queue:\${queue}\`, items.slice(1));
-  return items[0];
-}
-
-// ── Producer: push to any queue ─────────────────
-await stm.atomic(ctx, async (tx) => {
-  await queuePush(tx, "critical", "deploy-prod");
-});
-
-// ── Consumer: priority select ───────────────────
-// Tries critical first. If empty, normal. Then bulk.
-// If ALL empty, blocks until any queue gets a job.
-// Multiple consumers can run this simultaneously —
-// each dequeue is atomic, no double-processing.
-
-await stm.atomic(ctx, async (tx) => {
-  return await tx.select(
-    async () => ({
-      queue: "critical",
-      job: await queueShift(tx, "critical"),
-    }),
-    async () => ({
-      queue: "normal",
-      job: await queueShift(tx, "normal"),
-    }),
-    async () => ({
-      queue: "bulk",
-      job: await queueShift(tx, "bulk"),
-    }),
-  );
-});
-
-// How it works:
-// 1. select tries queueShift("critical")
-// 2. queueShift reads the TVar → empty → retry()
-// 3. select catches the retry, tries "normal"
-// 4. queueShift reads → has items → returns first
-// 5. Transaction commits: item removed atomically
-//
-// If all queues empty: retry() propagates up.
-// The transaction suspends until ANY queue TVar
-// changes — then re-runs from the top.`}</code></pre>
-      </div>
+      <HighlightedCode title="The code" code={QUEUE_CODE} />
     </div>
   );
 }
