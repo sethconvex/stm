@@ -3,141 +3,109 @@ import { useMutation, useQuery } from "convex/react";
 import { api } from "../convex/_generated/api";
 import { useState } from "react";
 
-const WAREHOUSES = [
-  { key: "us-west", label: "US West", flag: "\uD83C\uDDFA\uD83C\uDDF8" },
-  { key: "eu-central", label: "EU Central", flag: "\uD83C\uDDEA\uD83C\uDDFA" },
-  { key: "asia-east", label: "Asia East", flag: "\uD83C\uDDEF\uD83C\uDDF5" },
+const PROVIDERS = [
+  { key: "printful", label: "Printful", color: "#2563eb" },
+  { key: "printify", label: "Printify", color: "#16a34a" },
+  { key: "gooten", label: "Gooten", color: "#9333ea" },
 ];
 
-function Stock() {
-  const stock = useQuery(api.example.readStock) ?? {};
+const DESIGNS = ["Convex Logo Tee", "STM All-Stars", "Retry Until I Die"];
+const SIZES = ["S", "M", "L", "XL"];
+
+function ProviderStatus() {
+  const providers = useQuery(api.example.readProviders) ?? {};
+  const toggle = useMutation(api.example.toggleProvider);
+
   return (
-    <div className="stock">
-      {WAREHOUSES.map((wh) => (
-        <div key={wh.key} className="stock-item">
-          <span className="stock-flag">{wh.flag}</span>
-          <span className="stock-label">{wh.label}</span>
-          <span
-            className={`stock-value ${(stock[wh.key] ?? 0) === 0 ? "empty" : ""}`}
+    <div className="providers">
+      {PROVIDERS.map((p) => {
+        const online = providers[p.key] ?? false;
+        return (
+          <button
+            key={p.key}
+            className={`provider-card ${online ? "online" : "offline"}`}
+            style={{ borderColor: online ? p.color : "#333" }}
+            onClick={() => toggle({ provider: p.key })}
           >
-            {stock[wh.key] ?? 0}
-          </span>
-        </div>
-      ))}
+            <span className="provider-dot" style={{ background: online ? p.color : "#555" }} />
+            <span className="provider-name">{p.label}</span>
+            <span className="provider-status">{online ? "online" : "offline"}</span>
+          </button>
+        );
+      })}
     </div>
   );
 }
 
-function Orders() {
+function OrderForm() {
+  const orderShirt = useMutation(api.example.orderShirt);
+  const [design, setDesign] = useState(DESIGNS[0]);
+  const [size, setSize] = useState("L");
+  const [status, setStatus] = useState<string | null>(null);
+
+  const doOrder = async () => {
+    setStatus(null);
+    await orderShirt({ design, size });
+    setStatus("Order placed! Watch it get fulfilled below.");
+  };
+
+  return (
+    <div className="panel">
+      <h2>Order a T-Shirt</h2>
+      <div className="row">
+        <label>
+          Design
+          <select value={design} onChange={(e) => setDesign(e.target.value)}>
+            {DESIGNS.map((d) => <option key={d} value={d}>{d}</option>)}
+          </select>
+        </label>
+        <label>
+          Size
+          <select value={size} onChange={(e) => setSize(e.target.value)}>
+            {SIZES.map((s) => <option key={s} value={s}>{s}</option>)}
+          </select>
+        </label>
+        <button onClick={doOrder}>Order</button>
+      </div>
+      {status && <div className="status">{status}</div>}
+    </div>
+  );
+}
+
+function OrderFeed() {
   const orders = useQuery(api.example.listOrders) ?? [];
   if (orders.length === 0) return null;
+
   return (
     <div className="orders">
       <h2>Orders</h2>
       {orders.map((o) => (
         <div key={o._id} className={`order ${o.status}`}>
-          <span className="order-dot" />
-          <span className="order-item">
-            {o.amount}x {o.item}
-          </span>
-          <span className="order-status">{o.status}</span>
-          {o.result && <span className="order-result">{o.result}</span>}
+          <div className="order-header">
+            <span className="order-dot" />
+            <span className="order-item">
+              {o.design} ({o.size})
+            </span>
+            <span className="order-status">{o.status}</span>
+            {o.provider && (
+              <span className="order-provider">via {o.provider}</span>
+            )}
+          </div>
+          {o.attempts.length > 0 && (
+            <div className="attempts">
+              {o.attempts.map((a, i) => (
+                <span
+                  key={i}
+                  className={`attempt ${a.result}`}
+                  title={`${a.provider}: ${a.result}`}
+                >
+                  {a.provider}: {a.result}
+                </span>
+              ))}
+            </div>
+          )}
         </div>
       ))}
-    </div>
-  );
-}
-
-function BuyPanel() {
-  const placeOrder = useMutation(api.example.placeOrder);
-  const [status, setStatus] = useState<string | null>(null);
-
-  const doBuy = async (warehouse: string) => {
-    setStatus(null);
-    const r = await placeOrder({ warehouse, amount: 1 });
-    setStatus(
-      r.immediate
-        ? "Completed immediately"
-        : `Waiting for ${warehouse} to restock...`,
-    );
-  };
-
-  return (
-    <div className="panel">
-      <h2>Order from a specific warehouse</h2>
-      <p className="hint">
-        If the warehouse is empty, the order waits. When someone restocks it,
-        the order completes automatically. No polling.
-      </p>
-      <div className="row">
-        {WAREHOUSES.map((wh) => (
-          <button key={wh.key} onClick={() => doBuy(wh.key)}>
-            {wh.flag} Buy from {wh.label}
-          </button>
-        ))}
-      </div>
-      {status && <div className="status">{status}</div>}
-    </div>
-  );
-}
-
-function SelectPanel() {
-  const buyFromAny = useMutation(api.example.buyFromAny);
-  const [status, setStatus] = useState<string | null>(null);
-
-  const doBuy = async () => {
-    setStatus(null);
-    const r = await buyFromAny({ amount: 1 });
-    setStatus(
-      r.immediate
-        ? "Completed immediately"
-        : "Waiting for ANY warehouse to restock...",
-    );
-  };
-
-  return (
-    <div className="panel highlight">
-      <h2>Order from any warehouse</h2>
-      <p className="hint">
-        Tries US West first. If empty, tries EU Central. If empty, tries Asia
-        East. If all are empty, the order waits and auto-completes when{" "}
-        <strong>any</strong> of them gets restocked.
-      </p>
-      <div className="row">
-        <button onClick={doBuy}>
-          Buy from US {"\u2192"} EU {"\u2192"} Asia (first available)
-        </button>
-      </div>
-      {status && <div className="status">{status}</div>}
-    </div>
-  );
-}
-
-function RestockPanel() {
-  const restock = useMutation(api.example.restock);
-  const [status, setStatus] = useState<string | null>(null);
-
-  const doRestock = async (warehouse: string, amount: number) => {
-    setStatus(null);
-    await restock({ warehouse, amount });
-    setStatus(`+${amount} to ${warehouse}. Waiting orders will auto-complete.`);
-  };
-
-  return (
-    <div className="panel restock">
-      <h2>Restock a warehouse</h2>
-      <p className="hint">
-        Adding stock wakes up any orders waiting for that warehouse.
-        Watch the orders go from yellow to green.
-      </p>
-      <div className="row">
-        {WAREHOUSES.map((wh) => (
-          <button key={wh.key} onClick={() => doRestock(wh.key, 3)}>
-            {wh.flag} +3
-          </button>
-        ))}
-      </div>
-      {status && <div className="status">{status}</div>}
     </div>
   );
 }
@@ -147,49 +115,49 @@ function App() {
 
   return (
     <div className="app">
-      <h1>Convex STM</h1>
+      <h1>T-Shirt Fulfillment</h1>
       <p className="subtitle">
-        Orders that wait for stock and auto-complete when it arrives.
+        Orders try Printful first. If rejected, Printify. Then Gooten.
         <br />
-        No polling. No subscriptions. No plumbing.
+        Toggle providers offline to see orders cascade to the next one.
       </p>
 
-      <Stock />
+      <ProviderStatus />
 
       <button className="reset-btn" onClick={() => setup({})}>
-        Reset everything
+        Reset
       </button>
 
-      <Orders />
-
-      <BuyPanel />
-      <SelectPanel />
-      <RestockPanel />
+      <OrderForm />
+      <OrderFeed />
 
       <div className="panel code">
-        <h2>The code</h2>
-        <pre>{`// A reusable building block. Just a function.
-async function buyFrom(tx, warehouse, amount) {
-  const stock = await tx.read(warehouse);
-  if (stock < amount) tx.retry();   // wait until restocked
-  tx.write(warehouse, stock - amount);
+        <h2>What's happening</h2>
+        <pre>{`// The building block. Pure logic, no IO.
+async function tryProvider(tx, orderId, provider) {
+  if (!await tx.read(\`provider:\${provider}:available\`))
+    tx.retry();  // offline — skip to next
+
+  const result = await tx.read(\`order:\${orderId}:\${provider}\`);
+  if (result === null)      { tx.write(..., "submitted"); return provider; }
+  if (result === "submitted") tx.retry();  // waiting for webhook
+  if (result === "accepted")  return provider; // done!
+  tx.retry();  // rejected — skip to next
 }
 
-// Order from a specific warehouse.
-// If empty, the order waits and auto-completes on restock.
-await stm.atomic(ctx, async (tx) => {
-  await buyFrom(tx, "us-west", 1);
-});
-
-// Order from any warehouse. Tries each in order.
-// If all empty, waits for ANY of them to restock.
+// Try each provider in order. First available wins.
+// If all fail, wait for ANY provider to change state.
 await stm.atomic(ctx, async (tx) => {
   return await tx.select(
-    async () => { await buyFrom(tx, "us-west", 1);    return "us-west"; },
-    async () => { await buyFrom(tx, "eu-central", 1); return "eu-central"; },
-    async () => { await buyFrom(tx, "asia-east", 1);  return "asia-east"; },
+    async () => tryProvider(tx, orderId, "printful"),
+    async () => tryProvider(tx, orderId, "printify"),
+    async () => tryProvider(tx, orderId, "gooten"),
   );
-});`}</pre>
+});
+
+// Provider API responds via webhook → writes the TVar
+// → wakes the blocked order → re-runs select()
+// → sees "rejected" → tries next provider automatically`}</pre>
       </div>
     </div>
   );

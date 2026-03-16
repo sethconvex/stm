@@ -2,60 +2,35 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { initConvexTest } from "./setup.test";
 import { api } from "./_generated/api";
 
-describe("Warehouse ordering", () => {
+describe("T-shirt fulfillment", () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
 
-  test("order completes immediately when in stock", async () => {
-    const t = initConvexTest();
-    await t.mutation(api.example.setup, {});
-    await t.mutation(api.example.restock, { warehouse: "us-west", amount: 5 });
-
-    const r = await t.mutation(api.example.placeOrder, {
-      warehouse: "us-west",
-      amount: 1,
-    });
-    expect(r.immediate).toBe(true);
-
-    const stock = await t.query(api.example.readStock, {});
-    expect(stock["us-west"]).toBe(4);
-  });
-
-  test("order goes pending when out of stock", async () => {
+  test("order is created with pending status", async () => {
     const t = initConvexTest();
     await t.mutation(api.example.setup, {});
 
-    const r = await t.mutation(api.example.placeOrder, {
-      warehouse: "us-west",
-      amount: 1,
+    await t.mutation(api.example.orderShirt, {
+      design: "Convex Logo Tee",
+      size: "L",
     });
-    expect(r.immediate).toBe(false);
 
     const orders = await t.query(api.example.listOrders, {});
-    expect(orders[0].status).toBe("pending");
+    expect(orders.length).toBe(1);
+    // Order is either pending or submitted (depending on provider availability)
+    expect(["pending", "submitted"]).toContain(orders[0].status);
   });
 
-  test("select picks first available warehouse", async () => {
-    const t = initConvexTest();
-    await t.mutation(api.example.setup, {});
-    // Only EU has stock
-    await t.mutation(api.example.restock, {
-      warehouse: "eu-central",
-      amount: 3,
-    });
-
-    const r = await t.mutation(api.example.buyFromAny, { amount: 1 });
-    expect(r.immediate).toBe(true);
-
-    const stock = await t.query(api.example.readStock, {});
-    expect(stock["eu-central"]).toBe(2);
-  });
-
-  test("select goes pending when all empty", async () => {
+  test("toggling provider updates availability", async () => {
     const t = initConvexTest();
     await t.mutation(api.example.setup, {});
 
-    const r = await t.mutation(api.example.buyFromAny, { amount: 1 });
-    expect(r.immediate).toBe(false);
+    let providers = await t.query(api.example.readProviders, {});
+    expect(providers["printful"]).toBe(true);
+
+    await t.mutation(api.example.toggleProvider, { provider: "printful" });
+
+    providers = await t.query(api.example.readProviders, {});
+    expect(providers["printful"]).toBe(false);
   });
 });

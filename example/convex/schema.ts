@@ -2,15 +2,22 @@ import { defineSchema, defineTable } from "convex/server";
 import { v } from "convex/values";
 
 export default defineSchema({
-  // Orders that block until stock is available, then auto-complete.
   orders: defineTable({
-    item: v.string(),
-    amount: v.number(),
+    design: v.string(),
+    size: v.string(),
     status: v.union(
       v.literal("pending"),
-      v.literal("completed"),
+      v.literal("submitted"),
+      v.literal("fulfilled"),
       v.literal("failed"),
     ),
-    result: v.optional(v.string()),
+    provider: v.optional(v.string()),
+    attempts: v.array(
+      v.object({
+        provider: v.string(),
+        result: v.string(),
+        at: v.number(),
+      }),
+    ),
   }),
 });
