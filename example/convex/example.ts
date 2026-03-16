@@ -30,50 +30,40 @@ function providersFor(product: string) {
 // ═══════════════════════════════════════════════════════════════════════
 
 // For each item, check if we have a winner. If not, check if all
-// providers have been submitted. If not, submit them all. Then wait.
-async function raceProviders(tx: TX, orderId: string, item: string) {
-  const providers = providersFor(item);
+// Submit ALL items to ALL providers in one pass. Retry only at the end.
+// This means all items race in parallel — not one at a time.
+async function fulfillCart(tx: TX, orderId: string, items: string[]) {
+  const plan: { next: "done" | "submit-all"; item: string; provider?: string; providers?: string[] }[] = [];
+  let allDone = true;
 
-  // Do we already have a winner?
-  const winner = await tx.read(`order:${orderId}:${item}:winner`);
-  if (winner) return { next: "done" as const, item, provider: winner as string };
+  for (const item of items) {
+    // Already have a winner for this item?
+    const winner = await tx.read(`order:${orderId}:${item}:winner`);
+    if (winner) {
+      plan.push({ next: "done", item, provider: winner as string });
+      continue;
+    }
 
-  // Submit to ALL capable providers simultaneously
-  const toSubmit: string[] = [];
-  let anyPending = false;
-  for (const p of providers) {
-    const available = await tx.read(`provider:${p}:available`);
-    if (!available) continue;
+    // No winner yet — submit to all capable providers
+    allDone = false;
+    const toSubmit: string[] = [];
+    for (const p of providersFor(item)) {
+      const available = await tx.read(`provider:${p}:available`);
+      if (!available) continue;
 
-    const status = await tx.read(`order:${orderId}:${item}:${p}`);
-    if (status === null || status === "rejected" || status === "canceled") {
-      // Not yet submitted, or previously rejected — (re)submit
-      tx.write(`order:${orderId}:${item}:${p}`, "submitted");
-      toSubmit.push(p);
-    } else if (status === "submitted") {
-      anyPending = true; // still waiting on this one
+      const status = await tx.read(`order:${orderId}:${item}:${p}`);
+      if (status === null || status === "rejected" || status === "canceled") {
+        tx.write(`order:${orderId}:${item}:${p}`, "submitted");
+        toSubmit.push(p);
+      }
+    }
+    if (toSubmit.length > 0) {
+      plan.push({ next: "submit-all", item, providers: toSubmit });
     }
   }
 
-  if (toSubmit.length > 0) {
-    return { next: "submit-all" as const, item, providers: toSubmit };
-  }
-
-  if (anyPending) {
-    // Some providers still processing — wait for response
-    tx.retry();
-  }
-
-  // All available providers rejected and none pending — wait for a
-  // provider to come back online (availability TVar is in read set)
-  tx.retry();
-}
-
-async function fulfillCart(tx: TX, orderId: string, items: string[]) {
-  const plan: any[] = [];
-  for (const item of items) {
-    plan.push(await raceProviders(tx, orderId, item));
-  }
+  // Return the plan — even if not all done. The caller dispatches
+  // actions for submit-all items and re-runs fulfillment later.
   return plan;
 }
 
