@@ -373,40 +373,48 @@ function App() {
           <button className="reset-btn" onClick={() => setup({})}>Reset</button>
           <div className="panel code">
             <h2>The code</h2>
-            <pre>{`// Try to claim an item from a provider.
-// Pure logic — no API calls. Retries if not resolved yet.
+            <pre>{`// ── THE BUILDING BLOCK ──────────────────────────
+// One function. Checks one provider for one item.
+// No API calls. No side effects. Just reads and writes.
+
 async function claimFrom(tx, orderId, item, provider) {
-  if (!await tx.read(\`provider:\${provider}:online\`)) tx.retry();
+  if (!await tx.read(\`provider:\${provider}:online\`))
+    tx.retry();     // offline — skip, try next
+
   const status = await tx.read(\`\${orderId}:\${item}:\${provider}\`);
-  if (status === "accepted") return provider;
-  if (status === "rejected") tx.retry();  // try next provider
-  tx.write(\`\${orderId}:\${item}:\${provider}\`, "submitted");
-  tx.retry();  // wait for webhook response
+  if (status === "accepted") return provider;  // won!
+  if (status === "rejected") tx.retry();       // nope, next
+  tx.retry();       // still waiting for response
 }
 
-// Fill the cart. Each item races its providers with a timeout.
-// select() tries each provider — first to accept wins.
-// Timeout means "give up on this provider, try the next."
-// All composable — select composes with retry composes with timeout.
+// ── COMPOSING IT ────────────────────────────────
+// select() tries each provider for an item.
+// First one accepted wins. Timeout skips slow ones.
+// The for loop makes the whole CART atomic.
+
 const result = await stm.atomic(ctx, async (tx) => {
-  const assignments = {};
+  const winners = {};
   for (const item of ["shirt", "mug", "poster"]) {
-    assignments[item] = await tx.select(
+    winners[item] = await tx.select(
       ...providersFor(item).map(p => ({
-        fn: async () => claimFrom(tx, orderId, item, p),
-        timeout: 3000,  // 3s per provider
+        fn: () => claimFrom(tx, orderId, item, p),
+        timeout: 3000,   // give up after 3s
       })),
     );
   }
-  return assignments;
+  return winners;
 });
-// If committed: all items sourced. Ship it.
-// If not: all providers timed out. Order expired.
 
-// IO happens outside the transaction:
-// → action calls fetch() to each provider
-// → provider webhooks back accepted/rejected
-// → webhook writes the TVar → re-runs the transaction`}</pre>
+// committed → all items sourced → ship it
+// not committed → timed out → order expired
+// No partial orders. All or nothing.
+
+// ── IO HAPPENS OUTSIDE ─────────────────────────
+// 1. Action calls fetch() to provider API
+// 2. Provider webhooks back accepted/rejected
+// 3. Webhook writes the TVar
+// 4. Transaction re-runs automatically
+//    → sees "accepted" → returns the winner`}</pre>
           </div>
         </div>
         <div className="col-right">
