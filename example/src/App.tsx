@@ -15,62 +15,74 @@ const PROVIDER_COLORS: Record<string, string> = {
   gooten: "#9333ea",
 };
 
-// ── Guided walkthrough steps ──────────────────────────────────────────
+// ── Walkthrough ───────────────────────────────────────────────────────
 
 const STEPS = [
   {
-    title: "The catalog",
-    body: "Three providers, each making different products. No single provider makes everything.",
+    title: "Meet the providers",
+    body: "Three print providers, each making different products. Click any provider card to toggle it on/off. The slider controls how often it rejects orders.",
     action: null,
-    highlight: "providers",
+    setup: { printful: { rate: 0 }, printify: { rate: 0 }, gooten: { rate: 0 } },
   },
   {
-    title: "Order one item",
-    body: "Order a shirt. The STM transaction tries Printful first (it makes shirts). Printful's simulated API takes 1-3 seconds to respond. Watch the order go from pending \u2192 submitted \u2192 fulfilled.",
-    action: { type: "order", items: ["shirt"] },
-    highlight: "orders",
+    title: "Order a shirt",
+    body: "With 0% failure, every provider accepts. Watch the order go pending \u2192 submitted \u2192 fulfilled in ~1 second.",
+    action: { type: "order" as const, items: ["shirt"] },
+    setup: null,
   },
   {
-    title: "Order all three",
-    body: "Now order shirt + mug + poster. No single provider makes all three, so STM splits the order: shirt from one provider, mug from another, poster from a third. All three must succeed \u2014 or the whole order waits.",
-    action: { type: "order", items: ["shirt", "mug", "poster"] },
-    highlight: "orders",
+    title: "Make Printful unreliable",
+    body: "Set Printful to 100% failure. Now order a shirt \u2014 Printful rejects it, and STM automatically falls through to Printify.",
+    action: { type: "order" as const, items: ["shirt"] },
+    setup: { printful: { rate: 100 } },
   },
   {
-    title: "Take Printful offline",
-    body: "Click Printful to take it offline. Shirts can now only come from Printify. Mugs can only come from Gooten. Try ordering shirt + mug and watch it route around the outage.",
-    action: { type: "toggle", provider: "printful" },
-    highlight: "providers",
+    title: "Order all three items",
+    body: "Shirt + mug + poster. No single provider makes all three. STM splits the order across providers. With Printful failing, shirts go to Printify, mugs to Gooten.",
+    action: { type: "order" as const, items: ["shirt", "mug", "poster"] },
+    setup: null,
   },
   {
-    title: "Order during outage",
-    body: "With Printful offline, order shirt + mug. The STM transaction skips Printful automatically \u2014 shirt goes to Printify, mug to Gooten.",
-    action: { type: "order", items: ["shirt", "mug"] },
-    highlight: "orders",
+    title: "Make everything unreliable",
+    body: "Set all providers to 80% failure. Orders will bounce between providers, retrying until one accepts each item. Watch the attempt badges pile up.",
+    action: { type: "order" as const, items: ["shirt", "mug"] },
+    setup: { printful: { rate: 80 }, printify: { rate: 80 }, gooten: { rate: 80 } },
   },
   {
-    title: "Bring Printful back",
-    body: "Click Printful to bring it back online. Any pending orders that were stuck waiting for Printful will automatically retry and complete.",
-    action: { type: "toggle", provider: "printful" },
-    highlight: "providers",
+    title: "Take a provider offline",
+    body: "Toggle Printful offline entirely. It won't even be tried. Orders route around it. Turn it back on and pending orders auto-retry.",
+    action: { type: "toggle" as const, provider: "printful" },
+    setup: null,
   },
   {
     title: "The code",
-    body: "That's it. Each item gets a select() across its capable providers. The whole cart is one atomic transaction. Blocking, retrying, and waking are handled by STM \u2014 not by you.",
+    body: "Each item gets a select() across its capable providers. The whole cart is one atomic transaction. 6 lines of code handle all the routing, retrying, and waiting.",
     action: null,
-    highlight: "code",
+    setup: { printful: { rate: 0 }, printify: { rate: 0 }, gooten: { rate: 0 } },
   },
 ];
 
 function Walkthrough({
   onOrder,
   onToggle,
+  onSetRate,
 }: {
   onOrder: (items: string[]) => void;
   onToggle: (provider: string) => void;
+  onSetRate: (provider: string, rate: number) => void;
 }) {
   const [step, setStep] = useState(0);
   const current = STEPS[step];
+
+  const goTo = (i: number) => {
+    const s = STEPS[i];
+    if (s.setup) {
+      for (const [p, cfg] of Object.entries(s.setup)) {
+        if ("rate" in cfg) onSetRate(p, cfg.rate);
+      }
+    }
+    setStep(i);
+  };
 
   const doAction = () => {
     if (!current.action) return;
@@ -82,85 +94,78 @@ function Walkthrough({
     <div className="walkthrough">
       <div className="walk-header">
         <span className="walk-step">
-          Step {step + 1} of {STEPS.length}
+          {step + 1}/{STEPS.length}
         </span>
         <span className="walk-title">{current.title}</span>
       </div>
       <p className="walk-body">{current.body}</p>
       <div className="walk-actions">
-        <button
-          className="walk-btn secondary"
-          onClick={() => setStep(Math.max(0, step - 1))}
-          disabled={step === 0}
-        >
+        <button className="walk-btn secondary" onClick={() => goTo(Math.max(0, step - 1))} disabled={step === 0}>
           Back
         </button>
         {current.action && (
           <button className="walk-btn primary" onClick={doAction}>
             {current.action.type === "order"
-              ? `Order ${(current.action as any).items.join(" + ")}`
-              : `Toggle ${(current.action as any).provider}`}
+              ? `Order ${current.action.items!.join(" + ")}`
+              : `Toggle ${current.action.provider}`}
           </button>
         )}
-        <button
-          className="walk-btn secondary"
-          onClick={() => setStep(Math.min(STEPS.length - 1, step + 1))}
-          disabled={step === STEPS.length - 1}
-        >
+        <button className="walk-btn secondary" onClick={() => goTo(Math.min(STEPS.length - 1, step + 1))} disabled={step === STEPS.length - 1}>
           Next
         </button>
       </div>
       <div className="walk-dots">
         {STEPS.map((_, i) => (
-          <span
-            key={i}
-            className={`walk-dot ${i === step ? "active" : ""}`}
-            onClick={() => setStep(i)}
-          />
+          <span key={i} className={`walk-dot ${i === step ? "active" : ""}`} onClick={() => goTo(i)} />
         ))}
       </div>
     </div>
   );
 }
 
-// ── Components ────────────────────────────────────────────────────────
+// ── Provider cards with failure rate ──────────────────────────────────
 
 function ProviderStatus() {
   const providers = useQuery(api.example.readProviders) ?? {};
   const toggle = useMutation(api.example.toggleProvider);
+  const setRate = useMutation(api.example.setFailRate);
 
   return (
-    <div className="providers" id="providers">
+    <div className="providers">
       {Object.entries(providers).map(([name, info]) => {
-        const p = info as { available: boolean; products: string[] };
+        const p = info as { available: boolean; products: string[]; failRate: number };
         return (
-          <button
-            key={name}
-            className={`provider-card ${p.available ? "online" : "offline"}`}
-            style={{ borderColor: p.available ? PROVIDER_COLORS[name] : "#333" }}
-            onClick={() => toggle({ provider: name })}
-          >
-            <span
-              className="provider-dot"
-              style={{
-                background: p.available ? PROVIDER_COLORS[name] : "#555",
-              }}
-            />
-            <span className="provider-name">{name}</span>
-            <span className="provider-products">
-              {p.products
-                .map((pr) => PRODUCTS.find((x) => x.key === pr)?.emoji)
-                .join(" ")}
-            </span>
-            <span className="provider-status">
-              {p.available ? "online" : "offline"}
-            </span>
-          </button>
+          <div key={name} className={`provider-card ${p.available ? "online" : "offline"}`} style={{ borderColor: p.available ? PROVIDER_COLORS[name] : "#333" }}>
+            <div className="provider-top" onClick={() => toggle({ provider: name })}>
+              <span className="provider-dot" style={{ background: p.available ? PROVIDER_COLORS[name] : "#555" }} />
+              <span className="provider-name">{name}</span>
+              <span className="provider-products">
+                {p.products.map((pr) => PRODUCTS.find((x) => x.key === pr)?.emoji).join(" ")}
+              </span>
+              <span className="provider-status">{p.available ? "online" : "offline"}</span>
+            </div>
+            {p.available && (
+              <div className="fail-rate">
+                <input
+                  type="range"
+                  min={0}
+                  max={100}
+                  value={p.failRate}
+                  onChange={(e) => setRate({ provider: name, rate: Number(e.target.value) })}
+                  className="slider"
+                  style={{ accentColor: PROVIDER_COLORS[name] }}
+                />
+                <span className="fail-label">{p.failRate}% fail</span>
+              </div>
+            )}
+          </div>
         );
       })}
     </div>
   );
 }
+
+// ── Order form ────────────────────────────────────────────────────────
 
 function OrderForm() {
   const placeOrder = useMutation(api.example.placeOrder);
@@ -180,57 +185,42 @@ function OrderForm() {
       <h2>Build Your Order</h2>
       <div className="cart-picker">
         {PRODUCTS.map((p) => (
-          <button
-            key={p.key}
-            className={`cart-item ${cart.has(p.key) ? "selected" : ""}`}
-            onClick={() => toggleItem(p.key)}
-          >
+          <button key={p.key} className={`cart-item ${cart.has(p.key) ? "selected" : ""}`} onClick={() => toggleItem(p.key)}>
             <span className="cart-emoji">{p.emoji}</span>
             <span>{p.key}</span>
           </button>
         ))}
       </div>
-      <button
-        onClick={() => placeOrder({ items: [...cart] })}
-        disabled={cart.size === 0}
-      >
+      <button onClick={() => placeOrder({ items: [...cart] })} disabled={cart.size === 0}>
         Order {[...cart].join(" + ")}
       </button>
     </div>
   );
 }
 
+// ── Order feed ────────────────────────────────────────────────────────
+
 function OrderFeed() {
   const orders = useQuery(api.example.listOrders) ?? [];
-  if (orders.length === 0) return null;
+  if (orders.length === 0) return <div className="orders empty">No orders yet. Use the walkthrough or place one.</div>;
 
   return (
-    <div className="orders" id="orders">
+    <div className="orders">
       <h2>Orders</h2>
       {orders.map((o) => (
         <div key={o._id} className={`order ${o.status}`}>
           <div className="order-header">
             <span className="order-dot" />
             <span className="order-item">
-              {o.items
-                .map((i: string) => PRODUCTS.find((p) => p.key === i)?.emoji)
-                .join(" + ")}{" "}
-              {o.items.join(" + ")}
+              {o.items.map((i: string) => PRODUCTS.find((p) => p.key === i)?.emoji).join("+")}
             </span>
             <span className="order-status">{o.status}</span>
           </div>
           {o.assignments && (
             <div className="assignments">
-              {Object.entries(
-                o.assignments as Record<string, string>,
-              ).map(([item, provider]) => (
-                <span
-                  key={item}
-                  className="assignment"
-                  style={{ borderColor: PROVIDER_COLORS[provider] }}
-                >
-                  {PRODUCTS.find((p) => p.key === item)?.emoji} {item} via{" "}
-                  {provider}
+              {Object.entries(o.assignments as Record<string, string>).map(([item, provider]) => (
+                <span key={item} className="assignment" style={{ borderColor: PROVIDER_COLORS[provider] }}>
+                  {PRODUCTS.find((p) => p.key === item)?.emoji} via {provider}
                 </span>
               ))}
             </div>
@@ -239,7 +229,7 @@ function OrderFeed() {
             <div className="attempts">
               {o.attempts.map((a: any, i: number) => (
                 <span key={i} className={`attempt ${a.result}`}>
-                  {a.item}@{a.provider}: {a.result}
+                  {PRODUCTS.find((p) => p.key === a.item)?.emoji}{a.provider.slice(0, 4)}: {a.result === "accepted" ? "\u2713" : "\u2717"}
                 </span>
               ))}
             </div>
@@ -250,10 +240,13 @@ function OrderFeed() {
   );
 }
 
+// ── App layout ────────────────────────────────────────────────────────
+
 function App() {
   const setup = useMutation(api.example.setup);
   const placeOrder = useMutation(api.example.placeOrder);
   const toggle = useMutation(api.example.toggleProvider);
+  const setRate = useMutation(api.example.setFailRate);
 
   return (
     <div className="app">
@@ -263,41 +256,35 @@ function App() {
       <Walkthrough
         onOrder={(items) => placeOrder({ items })}
         onToggle={(provider) => toggle({ provider })}
+        onSetRate={(provider, rate) => setRate({ provider, rate })}
       />
 
-      <ProviderStatus />
-
-      <button className="reset-btn" onClick={() => setup({})}>
-        Reset
-      </button>
-
-      <OrderForm />
-      <OrderFeed />
-
-      <div className="panel code" id="code">
-        <h2>The code</h2>
-        <pre>{`// Each item selects from its capable providers.
-// All items must succeed — or the whole cart waits.
-
-await stm.atomic(ctx, async (tx) => {
+      <div className="two-col">
+        <div className="col-left">
+          <ProviderStatus />
+          <OrderForm />
+          <button className="reset-btn" onClick={() => setup({})}>
+            Reset everything
+          </button>
+          <div className="panel code">
+            <h2>The code</h2>
+            <pre>{`await stm.atomic(ctx, async (tx) => {
   for (const item of cart) {
     await tx.select(
-      ...providersFor(item).map(p => async () =>
-        await tryProvider(tx, orderId, item, p)
+      ...providersFor(item).map(p =>
+        async () => {
+          await tryProvider(tx, id, item, p);
+          return p;
+        }
       ),
     );
   }
-});
-
-// tryProvider reads provider health + order state.
-// If offline → retry (skip, watch for change).
-// If rejected → retry (try next provider).
-// If accepted → done!
-// If not tried yet → submit to provider API.
-
-// Printful makes:  shirt, mug
-// Printify makes:  shirt, poster
-// Gooten makes:    mug, poster`}</pre>
+});`}</pre>
+          </div>
+        </div>
+        <div className="col-right">
+          <OrderFeed />
+        </div>
       </div>
     </div>
   );

@@ -150,9 +150,14 @@ export const submitToProvider = internalAction({
     provider: v.string(),
   },
   handler: async (ctx, { orderId, items, item, provider }) => {
-    // Simulate provider API (1-3s, 70% acceptance)
-    await new Promise((r) => setTimeout(r, 1000 + Math.random() * 2000));
-    const result = Math.random() < 0.7 ? "accepted" : "rejected";
+    // Read this provider's failure rate
+    const failRate = ((await ctx.runQuery(components.stm.lib.readTVar, {
+      key: `provider:${provider}:failRate`,
+    })) as number) ?? 30;
+
+    // Simulate provider API (1-2s delay)
+    await new Promise((r) => setTimeout(r, 800 + Math.random() * 1200));
+    const result = Math.random() * 100 >= failRate ? "accepted" : "rejected";
 
     await ctx.runMutation(internal.example.handleAndRetry, {
       orderId,
@@ -243,15 +248,24 @@ export const toggleProvider = mutation({
 //  Setup + reads
 // ═══════════════════════════════════════════════════════════════════════
 
+export const setFailRate = mutation({
+  args: { provider: v.string(), rate: v.number() },
+  handler: async (ctx, { provider, rate }) => {
+    await stm.atomic(ctx, async (tx) => {
+      tx.write(`provider:${provider}:failRate`, rate);
+    });
+  },
+});
+
 export const setup = mutation({
   args: {},
   handler: async (ctx) => {
     await ctx.runMutation(components.stm.lib.clearAll, {});
     await ctx.runMutation(components.stm.lib.commit, {
-      writes: PROVIDERS.map((p) => ({
-        key: `provider:${p}:available`,
-        value: true,
-      })),
+      writes: [
+        ...PROVIDERS.map((p) => ({ key: `provider:${p}:available`, value: true })),
+        ...PROVIDERS.map((p) => ({ key: `provider:${p}:failRate`, value: 30 })),
+      ],
     });
     const orders = await ctx.db.query("orders").collect();
     for (const o of orders) await ctx.db.delete(o._id);
@@ -261,13 +275,16 @@ export const setup = mutation({
 export const readProviders = query({
   args: {},
   handler: async (ctx) => {
-    const result: Record<string, { available: boolean; products: string[] }> = {};
+    const result: Record<string, { available: boolean; products: string[]; failRate: number }> = {};
     for (const p of PROVIDERS) {
       result[p] = {
         available: ((await ctx.runQuery(components.stm.lib.readTVar, {
           key: `provider:${p}:available`,
         })) as boolean) ?? false,
         products: CATALOG[p],
+        failRate: ((await ctx.runQuery(components.stm.lib.readTVar, {
+          key: `provider:${p}:failRate`,
+        })) as number) ?? 30,
       };
     }
     return result;
