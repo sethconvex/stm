@@ -24,81 +24,67 @@ export const setup = mutation({
 });
 
 // ── Composable building blocks ─────────────────────────────────────────
-// Plain functions. They compose freely. That's the whole point.
+// Plain async functions. They compose freely. No keys declared upfront.
 
 /** Take `amount` from a bin. Retries if insufficient. */
-function take(tx: TX, bin: string, amount: number) {
-  const have = tx.read(bin) as number;
+async function take(tx: TX, bin: string, amount: number) {
+  const have = (await tx.read(bin)) as number;
   if (have < amount) tx.retry();
   tx.write(bin, have - amount);
 }
 
 /** Put `amount` into a bin. */
-function put(tx: TX, bin: string, amount: number) {
-  const have = tx.read(bin) as number;
+async function put(tx: TX, bin: string, amount: number) {
+  const have = (await tx.read(bin)) as number;
   tx.write(bin, have + amount);
 }
 
 /** Move `amount` from one bin to another. Total conserved. */
-function move(tx: TX, from: string, to: string, amount: number) {
-  take(tx, from, amount);
-  put(tx, to, amount);
+async function move(tx: TX, from: string, to: string, amount: number) {
+  await take(tx, from, amount);
+  await put(tx, to, amount);
 }
 
 // ── Atomic move ────────────────────────────────────────────────────────
-// Both the take and put happen in ONE atomic step.
-// Total across all bins NEVER changes — not even mid-transaction.
 
 export const atomicMove = mutation({
   args: { from: v.string(), to: v.string(), amount: v.number() },
   handler: async (ctx, { from, to, amount }) => {
-    return await stm.atomic(
-      ctx,
-      (tx) => {
-        move(tx, from, to, amount);
-        return `moved ${amount} from ${from} to ${to}`;
-      },
-      [from, to],
-    );
+    return await stm.atomic(ctx, async (tx) => {
+      await move(tx, from, to, amount);
+      return `moved ${amount} from ${from} to ${to}`;
+    });
   },
 });
 
 // ── orElse: take from best available ───────────────────────────────────
-// "Take from gold. If empty, silver. If empty, bronze."
-// Each branch's writes are ROLLED BACK before trying the next.
-// This is impossible with a plain if/else when branches can block.
 
 export const takeBest = mutation({
   args: { amount: v.number() },
   handler: async (ctx, { amount }) => {
-    return await stm.atomic(
-      ctx,
-      (tx) => {
-        return tx.orElse(
-          () => {
-            take(tx, "gold", amount);
-            return "gold";
-          },
-          () =>
-            tx.orElse(
-              () => {
-                take(tx, "silver", amount);
-                return "silver";
-              },
-              () => {
-                take(tx, "bronze", amount);
-                return "bronze";
-              },
-            ),
-        );
-      },
-      ["gold", "silver", "bronze"],
-    );
+    return await stm.atomic(ctx, async (tx) => {
+      return await tx.orElse(
+        async () => {
+          await take(tx, "gold", amount);
+          return "gold";
+        },
+        async () =>
+          await tx.orElse(
+            async () => {
+              await take(tx, "silver", amount);
+              return "silver";
+            },
+            async () => {
+              await take(tx, "bronze", amount);
+              return "bronze";
+            },
+          ),
+      );
+    });
   },
 });
 
 // ── Stress test: N random moves in parallel ────────────────────────────
-// Every move conserves total. Run many concurrently to prove atomicity.
 
 export const randomMove = mutation({
   args: { seed: v.number() },
@@ -107,18 +93,14 @@ export const randomMove = mutation({
     const a = bins[seed % 3];
     const b = bins[(seed + 1) % 3];
     const amount = (seed % 5) + 1;
-    return await stm.atomic(
-      ctx,
-      (tx) => {
-        const have = tx.read(a) as number;
-        if (have < amount) return { skipped: true };
-        tx.write(a, have - amount);
-        const bHave = tx.read(b) as number;
-        tx.write(b, bHave + amount);
-        return { moved: amount, from: a, to: b };
-      },
-      bins,
-    );
+    return await stm.atomic(ctx, async (tx) => {
+      const have = (await tx.read(a)) as number;
+      if (have < amount) return { skipped: true };
+      tx.write(a, have - amount);
+      const bHave = (await tx.read(b)) as number;
+      tx.write(b, bHave + amount);
+      return { moved: amount, from: a, to: b };
+    });
   },
 });
 

@@ -37,15 +37,15 @@ const stm = new STM(components.stm);
 ### Composable Building Blocks
 
 ```ts
-// These are plain functions. They compose freely.
-function withdraw(tx: TX, account: string, amount: number) {
-  const bal = tx.read(account) as number;
+// Plain async functions. They compose freely. No keys declared upfront.
+async function withdraw(tx: TX, account: string, amount: number) {
+  const bal = await tx.read(account) as number;
   if (bal < amount) tx.retry(); // block until balance changes
   tx.write(account, bal - amount);
 }
 
-function deposit(tx: TX, account: string, amount: number) {
-  const bal = tx.read(account) as number;
+async function deposit(tx: TX, account: string, amount: number) {
+  const bal = await tx.read(account) as number;
   tx.write(account, bal + amount);
 }
 ```
@@ -56,10 +56,10 @@ Both operations happen in one atomic step:
 
 ```ts
 export const transfer = mutation(async (ctx) => {
-  await stm.atomic(ctx, (tx) => {
-    withdraw(tx, "checking", 100);
-    deposit(tx, "savings", 100);
-  }, ["checking", "savings"]);
+  await stm.atomic(ctx, async (tx) => {
+    await withdraw(tx, "checking", 100);
+    await deposit(tx, "savings", 100);
+  });
 });
 ```
 
@@ -69,12 +69,12 @@ Try account A first; if insufficient funds, try account B:
 
 ```ts
 export const withdrawFromEither = mutation(async (ctx) => {
-  await stm.atomic(ctx, (tx) => {
-    tx.orElse(
-      () => withdraw(tx, "checking", 100),
-      () => withdraw(tx, "savings", 100),
+  await stm.atomic(ctx, async (tx) => {
+    await tx.orElse(
+      async () => { await withdraw(tx, "checking", 100); },
+      async () => { await withdraw(tx, "savings", 100); },
     );
-  }, ["checking", "savings"]);
+  });
 });
 ```
 
@@ -105,17 +105,19 @@ Create an STM client from the installed component.
 
 Initialize a TVar. No-op if it already exists.
 
-### `stm.atomic(ctx, handler, keys, onRetry?)`
+### `stm.atomic(ctx, handler, onRetry?)`
 
-Run `handler(tx)` as an atomic transaction over the named TVar keys.
+Run `handler(tx)` as an atomic transaction. TVars are fetched on demand —
+no need to declare keys upfront.
 
 - **Commit**: handler returns normally -> all writes applied atomically
 - **Retry**: handler calls `tx.retry()` -> no writes, register waiters, block
 - **Abort**: handler throws -> no writes, exception propagates
 
-### `tx.read(key)` / `tx.write(key, value)`
+### `await tx.read(key)` / `tx.write(key, value)`
 
-Read/write TVars inside a transaction. Writes are buffered until commit.
+Read/write TVars inside a transaction. Reads are fetched on demand within
+the parent mutation's OCC transaction. Writes are buffered until commit.
 
 ### `tx.retry()`
 

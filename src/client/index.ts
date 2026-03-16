@@ -1,7 +1,6 @@
 import type {
   GenericMutationCtx,
   GenericDataModel,
-  FunctionHandle,
 } from "convex/server";
 import type { ComponentApi } from "../component/_generated/component.js";
 
@@ -12,17 +11,17 @@ import type { ComponentApi } from "../component/_generated/component.js";
  * Provides read, write, retry, and orElse.
  */
 export interface TX {
-  /** Read a TVar. Returns null if uninitialized. */
-  read(key: string): unknown;
+  /** Read a TVar. Returns null if uninitialized. Fetched on demand. */
+  read(key: string): Promise<unknown>;
   /** Write a TVar (buffered until commit). */
   write(key: string, value: unknown): void;
   /** Block until something we read changes. */
   retry(): never;
   /** Try fn1; if it retries, discard its writes and try fn2. */
-  orElse<T>(fn1: () => T, fn2: () => T): T;
+  orElse<T>(fn1: () => Promise<T>, fn2: () => Promise<T>): Promise<T>;
 }
 
-export type STMHandler<T> = (tx: TX) => T;
+export type STMHandler<T> = (tx: TX) => Promise<T>;
 
 /** Returned by atomic() when the transaction called retry(). */
 export type STMResult<T> =
@@ -45,13 +44,18 @@ class TXImpl implements TX {
   readSet: Record<string, unknown> = {};
   writeSet: Record<string, unknown> = {};
 
-  constructor(private readonly snapshot: Record<string, unknown>) {}
+  constructor(
+    private ctx: MutationCtx,
+    private component: ComponentApi,
+  ) {}
 
-  read(key: string): unknown {
+  async read(key: string): Promise<unknown> {
     // Read-your-writes: check writeSet first.
     if (key in this.writeSet) return this.writeSet[key];
-    // Then check snapshot (values fetched from DB before running handler).
-    const val = this.snapshot[key] ?? null;
+    // Already read in this transaction? Return cached value.
+    if (key in this.readSet) return this.readSet[key];
+    // Fetch on demand — within the parent mutation's OCC transaction.
+    const val = await this.ctx.runQuery(this.component.lib.readTVar, { key });
     this.readSet[key] = val;
     return val;
   }
@@ -64,13 +68,13 @@ class TXImpl implements TX {
     throw new RetrySignal();
   }
 
-  orElse<T>(fn1: () => T, fn2: () => T): T {
+  async orElse<T>(fn1: () => Promise<T>, fn2: () => Promise<T>): Promise<T> {
     // Save current state.
     const savedReadSet = { ...this.readSet };
     const savedWriteSet = { ...this.writeSet };
 
     try {
-      return fn1();
+      return await fn1();
     } catch (e) {
       if (!isRetrySignal(e)) throw e;
 
@@ -83,7 +87,7 @@ class TXImpl implements TX {
 
       // Try fn2. If it also retries, the RetrySignal propagates
       // with the merged readSet covering both branches.
-      return fn2();
+      return await fn2();
     }
   }
 }
@@ -100,9 +104,9 @@ type MutationCtx = GenericMutationCtx<GenericDataModel>;
  * const stm = new STM(components.stm);
  *
  * export const transfer = mutation(async (ctx) => {
- *   const result = await stm.atomic(ctx, (tx) => {
- *     const a = tx.read("account-a") as number;
- *     const b = tx.read("account-b") as number;
+ *   const result = await stm.atomic(ctx, async (tx) => {
+ *     const a = await tx.read("account-a") as number;
+ *     const b = await tx.read("account-b") as number;
  *     if (a < 100) tx.retry();
  *     tx.write("account-a", a - 100);
  *     tx.write("account-b", b + 100);
@@ -115,39 +119,19 @@ export class STM {
   constructor(private component: ComponentApi) {}
 
   /**
-   * Run a transaction atomically.
-   *
-   * - Reads are from a consistent snapshot.
-   * - Writes are buffered and committed atomically.
-   * - retry() blocks until a read TVar changes.
-   * - orElse() tries alternatives.
-   *
-   * Returns the handler's return value on commit,
-   * or throws if the handler throws (non-retry).
-   *
-   * If the handler calls retry(), this method calls the component's
-   * block() mutation to register waiters, and returns { status: "retry" }.
-   * The caller is responsible for actually blocking (e.g. a workflow step
-   * stays inProgress, or a standalone caller polls/subscribes).
+   * Run a transaction. TVars are fetched on demand — no need to
+   * declare keys upfront. All reads happen within the parent mutation's
+   * OCC transaction, so they're consistent with the commit.
    */
   async run<T>(
     ctx: MutationCtx,
     handler: STMHandler<T>,
-    keys: string[],
   ): Promise<STMResult<T>> {
-    // Step 1: Snapshot — read all TVars the handler might need.
-    const snapshot: Record<string, unknown> = {};
-    for (const key of keys) {
-      const doc = await ctx.runQuery(this.component.lib.readTVar, { key });
-      snapshot[key] = doc;
-    }
-
-    // Step 2: Run the handler with a fresh transaction context.
-    const tx = new TXImpl(snapshot);
+    const tx = new TXImpl(ctx, this.component);
 
     let value: T;
     try {
-      value = handler(tx);
+      value = await handler(tx);
     } catch (e) {
       if (isRetrySignal(e)) {
         return { status: "retry", readSet: tx.readSet };
@@ -155,7 +139,7 @@ export class STM {
       throw e; // Propagate non-retry exceptions (abort semantics).
     }
 
-    // Step 3: Commit — apply all writes atomically.
+    // Commit — apply all writes atomically.
     const writes = Object.entries(tx.writeSet).map(([key, val]) => ({
       key,
       value: val,
@@ -168,25 +152,23 @@ export class STM {
   }
 
   /**
-   * Convenience: run a transaction, automatically handling retry by
-   * registering waiters via the block() mutation.
+   * Run a transaction atomically. Convenience wrapper around run().
    *
-   * `callbackHandle` is a FunctionHandle<"mutation"> that will be called
-   * (via scheduler.runAfter) when a watched TVar changes.
-   * This is how the caller gets "woken up."
+   * Returns { committed: true, value } on success,
+   * or { committed: false } if the handler called retry().
    *
-   * Returns the committed value, or null if blocked (retry).
+   * If onRetry is provided, registers waiters so the caller is woken
+   * when a watched TVar changes.
    */
   async atomic<T>(
     ctx: MutationCtx,
     handler: STMHandler<T>,
-    keys: string[],
     onRetry?: {
       callbackHandle: string;
       callbackArgs?: Record<string, unknown>;
     },
   ): Promise<{ committed: true; value: T } | { committed: false }> {
-    const result = await this.run(ctx, handler, keys);
+    const result = await this.run(ctx, handler);
 
     if (result.status === "committed") {
       return { committed: true, value: result.value };
@@ -204,8 +186,6 @@ export class STM {
         callbackArgs: onRetry.callbackArgs,
       });
       if (!safeToBlock) {
-        // A TVar changed between read and block — retry immediately.
-        // Caller should re-invoke atomic().
         return { committed: false };
       }
     }
