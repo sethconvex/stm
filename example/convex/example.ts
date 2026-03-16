@@ -162,8 +162,8 @@ export const submitToProvider = internalAction({
       key: `provider:${provider}:failRate`,
     })) as number) ?? 30;
 
-    // Simulate provider API (1-3s delay)
-    await new Promise((r) => setTimeout(r, 1000 + Math.random() * 2000));
+    // Simulate provider API — takes 1-5s (we don't control this)
+    await new Promise((r) => setTimeout(r, 1000 + Math.random() * 4000));
 
     // Check if we were already timed out (the STM timeout TVar fired)
     const current = await ctx.runQuery(components.stm.lib.readTVar, {

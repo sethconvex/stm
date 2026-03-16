@@ -68,8 +68,8 @@ const STEPS = [
     },
   },
   {
-    title: "Slow provider \u2192 timeout",
-    body: "All online, but Printful has a 1s timeout. It takes up to 2s to respond, so half the time it times out (\u23F1) and STM cascades to the next provider.",
+    title: "We stop waiting",
+    body: "All online, but we only wait 1s for Printful. Providers take 1-5s to respond \u2014 so Printful often times out (\u23F1) and we move on to the next provider. The provider doesn't know we gave up.",
     action: { type: "order" as const, items: ["shirt", "mug"] },
     setup: {
       printful: { online: true, rate: 0, timeout: 1000 },
@@ -194,7 +194,7 @@ function ProviderStatus() {
                   <span className="slider-value">{p.failRate}%</span>
                 </div>
                 <div className="slider-row">
-                  <span className="slider-label">Timeout</span>
+                  <span className="slider-label">Wait</span>
                   <input type="range" min={500} max={10000} step={500} value={p.timeout}
                     onChange={(e) => setTO({ provider: name, timeout: Number(e.target.value) })}
                     style={{ accentColor: PROVIDER_COLORS[name] }} />
@@ -302,22 +302,35 @@ function App() {
           <button className="reset-btn" onClick={() => setup({})}>Reset</button>
           <div className="panel code">
             <h2>The code</h2>
-            <pre>{`// Each item selects from capable providers.
-// All items must succeed atomically.
-// Failures, timeouts, and retries are automatic.
+            <pre>{`// 1. One function tries one provider for one item.
+//    It doesn't know about carts, timeouts, or other providers.
+async function tryProvider(tx, orderId, item, provider) {
+  const available = await tx.read(\`provider:\${provider}:available\`);
+  if (!available) tx.retry();  // offline — skip, watch for change
 
+  const result = await tx.read(\`order:\${orderId}:\${item}:\${provider}\`);
+  if (result === null)       { tx.write(..., "submitted"); return provider; }
+  if (result === "submitted")  tx.retry();   // waiting for API response
+  if (result === "accepted")   return provider;
+  tx.retry();  // rejected or timed out — try next
+}
+
+// 2. For each cart item, try capable providers with a timeout.
+//    "Wait up to 3s for Printful. If no response, try Printify."
 await stm.atomic(ctx, async (tx) => {
   for (const item of cart) {
     await tx.select(
-      ...providersFor(item).map(p =>
-        async () => {
-          await tryProvider(tx, id, item, p);
-          return p;
-        }
-      ),
+      ...providersFor(item).map(p => ({
+        fn: async () => await tryProvider(tx, orderId, item, p),
+        timeout: await tx.read(\`provider:\${p}:timeout\`),
+      })),
     );
   }
-});`}</pre>
+});
+
+// 3. Providers respond via webhook → writes the TVar → wakes the order.
+//    If our timeout fires first, we've already moved to the next provider.
+//    The whole cart is atomic: all items succeed or the order waits.`}</pre>
           </div>
         </div>
         <div className="col-right">
