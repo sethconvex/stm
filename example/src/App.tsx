@@ -424,8 +424,8 @@ const JOB_NAMES = ["deploy", "backup", "report", "sync", "migrate", "audit", "no
 function QueueDemo() {
   const queues = useQuery(api.queue.readQueues) ?? { critical: [], normal: [], bulk: [] };
   const processed = useQuery(api.queue.readProcessed) ?? [];
-  const enqueue = useMutation(api.queue.enqueue);
-  const dequeue = useMutation(api.queue.dequeue);
+  const enqueueBatch = useMutation(api.queue.enqueueBatch);
+  const dequeueBatch = useMutation(api.queue.dequeueBatch);
   const setupQ = useMutation(api.queue.setupQueues);
 
   const [producerRate, setProducerRate] = useState(5);
@@ -449,21 +449,25 @@ function QueueDemo() {
     setRunning(true);
     runningRef.current = true;
 
+    // Producer: batch jobs per tick (~4 ticks/sec, batch size scales with rate)
     const producerTick = () => {
       if (!runningRef.current) return;
-      enqueue({ queue: randomQueue(), job: randomJob() });
-      schedule(producerTick, 1000 / producerRate);
+      const batchSize = Math.max(1, Math.ceil(producerRate / 4));
+      const jobs = Array.from({ length: batchSize }, () => ({
+        queue: randomQueue(), job: randomJob(),
+      }));
+      enqueueBatch({ jobs });
+      schedule(producerTick, 250);
     };
     producerTick();
 
-    for (let i = 0; i < consumerCount; i++) {
-      const consumerTick = () => {
-        if (!runningRef.current) return;
-        dequeue({});
-        schedule(consumerTick, 200 + Math.random() * 300);
-      };
-      consumerTick();
-    }
+    // Consumer: batch dequeue per tick
+    const consumerTick = () => {
+      if (!runningRef.current) return;
+      dequeueBatch({ count: consumerCount });
+      schedule(consumerTick, 300);
+    };
+    consumerTick();
   };
 
   const stop = () => {

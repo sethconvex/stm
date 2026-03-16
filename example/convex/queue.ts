@@ -37,6 +37,43 @@ export const enqueue = mutation({
   },
 });
 
+// Batch enqueue — one mutation for multiple jobs
+export const enqueueBatch = mutation({
+  args: { jobs: v.array(v.object({ queue: v.string(), job: v.string() })) },
+  handler: async (ctx, { jobs }) => {
+    await stm.atomic(ctx, async (tx) => {
+      for (const { queue, job } of jobs) {
+        await queuePush(tx, queue, job);
+      }
+    });
+  },
+});
+
+// Batch dequeue — one mutation takes N jobs
+export const dequeueBatch = mutation({
+  args: { count: v.number() },
+  handler: async (ctx, { count }) => {
+    const taken: { queue: string; job: string }[] = [];
+    for (let i = 0; i < count; i++) {
+      const result = await stm.atomic(ctx, async (tx) => {
+        return await tx.select(
+          async () => ({ queue: "critical", job: await queueShift(tx, "critical") }),
+          async () => ({ queue: "normal", job: await queueShift(tx, "normal") }),
+          async () => ({ queue: "bulk", job: await queueShift(tx, "bulk") }),
+        );
+      });
+      if (!result.committed) break;
+      taken.push(result.value);
+      await ctx.db.insert("processedJobs", {
+        queue: result.value.queue,
+        job: result.value.job,
+        at: Date.now(),
+      });
+    }
+    return taken;
+  },
+});
+
 // ═══════════════════════════════════════════════════════════════════════
 //  Worker: take from highest-priority non-empty queue
 // ═══════════════════════════════════════════════════════════════════════
