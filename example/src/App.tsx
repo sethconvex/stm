@@ -236,7 +236,7 @@ function OrderFeed() {
             <div className="attempts">
               {o.attempts.map((a: any, i: number) => (
                 <span key={i} className={`attempt ${a.result}`}>
-                  {PRODUCTS.find((p) => p.key === a.item)?.emoji}{a.provider.slice(0, 5)}:{a.result === "accepted" ? "\u2713" : a.result === "timeout" ? "\u23F1" : "\u2717"}
+                  {PRODUCTS.find((p) => p.key === a.item)?.emoji}{a.provider}:{a.result === "accepted" ? "\u2713" : a.result === "timeout" ? "\u23F1" : "\u2717"}
                 </span>
               ))}
             </div>
