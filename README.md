@@ -1,82 +1,79 @@
 # Convex STM
 
-Composable memory transactions for Convex, based on
-[Harris et al., "Composable Memory Transactions" (PPoPP 2005)](https://research.microsoft.com/en-us/um/people/simonpj/papers/stm/).
+Operations that wait for the right conditions and complete automatically.
 
-Atomic read-modify-write with **retry** (composable blocking) and
-**orElse** (composable choice).
+## What it does
 
-## The Problem
+You write a function that reads some state and maybe writes some state. If the
+state isn't ready yet (out of stock, slot not available, balance too low), call
+`tx.retry()`. The operation **waits** — and when the state changes, it
+**re-runs automatically** and completes.
 
-Convex mutations are already atomic. But you can't easily:
+No polling. No subscriptions. No event plumbing.
 
-- **Block until a condition holds** without polling
-- **Try alternative paths** when one blocks
-- **Compose** the above without knowing implementation details
-
-```ts
-// Easy: atomic transfer
-await ctx.db.patch(accountA, { balance: a - 100 });
-await ctx.db.patch(accountB, { balance: b + 100 });
-
-// Hard: block until accountA has enough funds
-// Hard: try accountA, else try accountB
-// Hard: compose the above
-```
-
-## The Solution
-
-Three primitives: **TVars**, **retry**, and **orElse**.
+## Example: ordering from a warehouse
 
 ```ts
-import { STM } from "@convex-dev/stm";
-
-const stm = new STM(components.stm);
-```
-
-### Composable Building Blocks
-
-```ts
-// Plain async functions. They compose freely. No keys declared upfront.
-async function withdraw(tx: TX, account: string, amount: number) {
-  const bal = await tx.read(account) as number;
-  if (bal < amount) tx.retry(); // block until balance changes
-  tx.write(account, bal - amount);
-}
-
-async function deposit(tx: TX, account: string, amount: number) {
-  const bal = await tx.read(account) as number;
-  tx.write(account, bal + amount);
+async function buyFrom(tx: TX, warehouse: string, amount: number) {
+  const stock = await tx.read(warehouse);
+  if (stock < amount) tx.retry();   // not enough — wait for restock
+  tx.write(warehouse, stock - amount);
 }
 ```
 
-### Sequential Composition
+That's it. `buyFrom` doesn't know how restocking works, who else is buying,
+or what happens when stock runs out. It just says "I need this condition to
+hold" and the system handles the rest.
 
-Both operations happen in one atomic step:
+### Wait for stock
 
 ```ts
-export const transfer = mutation(async (ctx) => {
-  await stm.atomic(ctx, async (tx) => {
-    await withdraw(tx, "checking", 100);
-    await deposit(tx, "savings", 100);
-  });
+// If us-west is empty, this order waits.
+// When someone restocks us-west, the order auto-completes.
+await stm.atomic(ctx, async (tx) => {
+  await buyFrom(tx, "us-west", 1);
 });
 ```
 
-### Choice Composition (orElse)
-
-Try account A first; if insufficient funds, try account B:
+### Try multiple options
 
 ```ts
-export const withdrawFromEither = mutation(async (ctx) => {
-  await stm.atomic(ctx, async (tx) => {
-    await tx.orElse(
-      async () => { await withdraw(tx, "checking", 100); },
-      async () => { await withdraw(tx, "savings", 100); },
-    );
-  });
+// Try US first. If empty, try EU. If empty, try Asia.
+// If ALL are empty, wait for ANY of them to restock.
+await stm.atomic(ctx, async (tx) => {
+  return await tx.select(
+    async () => { await buyFrom(tx, "us-west", 1);    return "us-west"; },
+    async () => { await buyFrom(tx, "eu-central", 1); return "eu-central"; },
+    async () => { await buyFrom(tx, "asia-east", 1);  return "asia-east"; },
+  );
 });
 ```
+
+Each option is tried in order. If it can't proceed, its changes are rolled
+back and the next option is tried. If none can proceed, the operation waits
+for any of them to become possible.
+
+### Restock wakes waiting orders
+
+```ts
+// Adding stock automatically wakes any orders waiting for it.
+await stm.atomic(ctx, async (tx) => {
+  const stock = await tx.read("us-west");
+  tx.write("us-west", stock + 10);
+});
+// ^ Any orders blocked on "us-west" will now re-run and complete.
+```
+
+## How it works
+
+1. Your function reads some shared variables and decides what to do
+2. If it calls `tx.retry()`, the system records what was read
+3. The operation waits (no CPU, no polling)
+4. When any of those variables change, the operation re-runs from scratch
+5. This time conditions might be met — if so, writes are committed atomically
+
+This is based on [Software Transactional Memory](https://research.microsoft.com/en-us/um/people/simonpj/papers/stm/)
+(Harris et al., 2005), adapted for Convex's serverless model.
 
 ## Installation
 
@@ -95,44 +92,58 @@ app.use(stm);
 export default app;
 ```
 
+```ts
+// In your code
+import { STM } from "@convex-dev/stm";
+const stm = new STM(components.stm);
+```
+
 ## API
-
-### `new STM(components.stm)`
-
-Create an STM client from the installed component.
-
-### `stm.init(ctx, key, value)`
-
-Initialize a TVar. No-op if it already exists.
 
 ### `stm.atomic(ctx, handler, onRetry?)`
 
-Run `handler(tx)` as an atomic transaction. TVars are fetched on demand —
-no need to declare keys upfront.
+Run a function atomically. Reads happen on demand. Writes are buffered and
+committed together when the function returns.
 
-- **Commit**: handler returns normally -> all writes applied atomically
-- **Retry**: handler calls `tx.retry()` -> no writes, register waiters, block
-- **Abort**: handler throws -> no writes, exception propagates
+```ts
+await stm.atomic(ctx, async (tx) => {
+  const count = await tx.read("visitors");
+  tx.write("visitors", count + 1);
+  return count + 1;
+});
+```
 
-### `await tx.read(key)` / `tx.write(key, value)`
+### `tx.read(key)` / `tx.write(key, value)`
 
-Read/write TVars inside a transaction. Reads are fetched on demand within
-the parent mutation's OCC transaction. Writes are buffered until commit.
+Read and write shared variables inside a transaction. Reads fetch the current
+value from the database. Writes are held in memory until the transaction commits.
 
 ### `tx.retry()`
 
-Block until something we read changes. The system tracks exactly which
-TVars were read and wakes us when any of them is written.
+"I can't proceed right now." Discards all writes, records what was read, and
+waits. When any of those values change, the whole function re-runs.
+
+### `tx.select(option1, option2, ...)`
+
+Try each option in order. The first one that doesn't retry wins. If all retry,
+wait for any of their conditions to change.
+
+```ts
+await tx.select(
+  async () => { /* try this first */ },
+  async () => { /* then this */ },
+  async () => { /* last resort */ },
+);
+```
 
 ### `tx.orElse(fn1, fn2)`
 
-Try `fn1`. If it retries, discard its writes and try `fn2`.
-If both retry, block on the union of their read sets.
+The two-option version of `select`. Try `fn1`. If it retries, roll back its
+writes and try `fn2`.
 
-## Design
+### `stm.init(ctx, key, value)`
 
-See [model/stm.md](./model/stm.md) for the full design doc with
-invariants and race condition analysis.
+Set a variable's initial value. Does nothing if it already exists.
 
 ## Development
 
@@ -140,3 +151,11 @@ invariants and race condition analysis.
 npm i
 npm run dev
 ```
+
+The example app shows a warehouse ordering system where orders wait for stock
+and auto-complete when it arrives. See `example/convex/example.ts`.
+
+## Design
+
+See [model/stm.md](./model/stm.md) for invariants, race condition analysis,
+and correctness proofs.

@@ -3,22 +3,27 @@ import { useMutation, useQuery } from "convex/react";
 import { api } from "../convex/_generated/api";
 import { useState } from "react";
 
+const WAREHOUSES = [
+  { key: "us-west", label: "US West", flag: "\uD83C\uDDFA\uD83C\uDDF8" },
+  { key: "eu-central", label: "EU Central", flag: "\uD83C\uDDEA\uD83C\uDDFA" },
+  { key: "asia-east", label: "Asia East", flag: "\uD83C\uDDEF\uD83C\uDDF5" },
+];
+
 function Stock() {
-  const stock = useQuery(api.example.readStock) ?? { widgets: 0, gadgets: 0 };
+  const stock = useQuery(api.example.readStock) ?? {};
   return (
     <div className="stock">
-      <div className="stock-item">
-        <span className="stock-label">Widgets</span>
-        <span className={`stock-value ${stock.widgets === 0 ? "empty" : ""}`}>
-          {stock.widgets}
-        </span>
-      </div>
-      <div className="stock-item">
-        <span className="stock-label">Gadgets</span>
-        <span className={`stock-value ${stock.gadgets === 0 ? "empty" : ""}`}>
-          {stock.gadgets}
-        </span>
-      </div>
+      {WAREHOUSES.map((wh) => (
+        <div key={wh.key} className="stock-item">
+          <span className="stock-flag">{wh.flag}</span>
+          <span className="stock-label">{wh.label}</span>
+          <span
+            className={`stock-value ${(stock[wh.key] ?? 0) === 0 ? "empty" : ""}`}
+          >
+            {stock[wh.key] ?? 0}
+          </span>
+        </div>
+      ))}
     </div>
   );
 }
@@ -47,58 +52,62 @@ function BuyPanel() {
   const placeOrder = useMutation(api.example.placeOrder);
   const [status, setStatus] = useState<string | null>(null);
 
-  const doBuy = async (item: string) => {
+  const doBuy = async (warehouse: string) => {
     setStatus(null);
-    const r = await placeOrder({ item, amount: 1 });
+    const r = await placeOrder({ warehouse, amount: 1 });
     setStatus(
       r.immediate
-        ? `Order completed immediately`
-        : `Order pending — will auto-complete when ${item} restocked`,
+        ? "Completed immediately"
+        : `Waiting for ${warehouse} to restock...`,
     );
   };
 
   return (
     <div className="panel">
-      <h2>Buy (retry)</h2>
+      <h2>Order from a specific warehouse</h2>
       <p className="hint">
-        Places an order. If stock is 0, the order goes <strong>pending</strong>{" "}
-        and <strong>automatically completes</strong> when restocked. No polling.
-        No subscriptions. The STM retry{"\u2192"}wake loop handles it.
+        If the warehouse is empty, the order waits. When someone restocks it,
+        the order completes automatically. No polling.
       </p>
       <div className="row">
-        <button onClick={() => doBuy("widgets")}>Buy 1 Widget</button>
-        <button onClick={() => doBuy("gadgets")}>Buy 1 Gadget</button>
+        {WAREHOUSES.map((wh) => (
+          <button key={wh.key} onClick={() => doBuy(wh.key)}>
+            {wh.flag} Buy from {wh.label}
+          </button>
+        ))}
       </div>
       {status && <div className="status">{status}</div>}
     </div>
   );
 }
 
-function OrElsePanel() {
-  const buyFromEither = useMutation(api.example.buyFromEither);
+function SelectPanel() {
+  const buyFromAny = useMutation(api.example.buyFromAny);
   const [status, setStatus] = useState<string | null>(null);
 
   const doBuy = async () => {
     setStatus(null);
-    const r = await buyFromEither({ a: "widgets", b: "gadgets", amount: 1 });
+    const r = await buyFromAny({ amount: 1 });
     setStatus(
       r.immediate
-        ? `Order completed immediately`
-        : `Order pending — will auto-complete when EITHER is restocked`,
+        ? "Completed immediately"
+        : "Waiting for ANY warehouse to restock...",
     );
   };
 
   return (
     <div className="panel highlight">
-      <h2>Buy from Either (orElse)</h2>
+      <h2>Order from any warehouse</h2>
       <p className="hint">
-        "Buy a widget. If out of stock, buy a gadget instead." Each branch can
-        block independently. <strong>orElse</strong> composes them — tries
-        widgets first, rolls back, tries gadgets. If both are empty, blocks on
-        the <strong>union</strong> of both watch sets. Restocking either one
-        wakes the order.
+        Tries US West first. If empty, tries EU Central. If empty, tries Asia
+        East. If all are empty, the order waits and auto-completes when{" "}
+        <strong>any</strong> of them gets restocked.
       </p>
-      <button onClick={doBuy}>Buy Widget orElse Gadget</button>
+      <div className="row">
+        <button onClick={doBuy}>
+          Buy from US {"\u2192"} EU {"\u2192"} Asia (first available)
+        </button>
+      </div>
       {status && <div className="status">{status}</div>}
     </div>
   );
@@ -108,33 +117,25 @@ function RestockPanel() {
   const restock = useMutation(api.example.restock);
   const [status, setStatus] = useState<string | null>(null);
 
-  const doRestock = async (item: string, amount: number) => {
+  const doRestock = async (warehouse: string, amount: number) => {
     setStatus(null);
-    await restock({ item, amount });
-    setStatus(`Restocked ${amount} ${item} — pending orders will auto-complete`);
+    await restock({ warehouse, amount });
+    setStatus(`+${amount} to ${warehouse}. Waiting orders will auto-complete.`);
   };
 
   return (
     <div className="panel restock">
-      <h2>Restock (this wakes blocked orders)</h2>
+      <h2>Restock a warehouse</h2>
       <p className="hint">
-        Adding stock writes to TVars. The STM commit finds waiters and fires
-        their callbacks. Pending orders re-run their transactions and complete.
-        Watch the orders above go from pending {"\u2192"} completed.
+        Adding stock wakes up any orders waiting for that warehouse.
+        Watch the orders go from yellow to green.
       </p>
       <div className="row">
-        <button onClick={() => doRestock("widgets", 3)}>
-          +3 Widgets
-        </button>
-        <button onClick={() => doRestock("gadgets", 3)}>
-          +3 Gadgets
-        </button>
-        <button onClick={() => doRestock("widgets", 1)}>
-          +1 Widget
-        </button>
-        <button onClick={() => doRestock("gadgets", 1)}>
-          +1 Gadget
-        </button>
+        {WAREHOUSES.map((wh) => (
+          <button key={wh.key} onClick={() => doRestock(wh.key, 3)}>
+            {wh.flag} +3
+          </button>
+        ))}
       </div>
       {status && <div className="status">{status}</div>}
     </div>
@@ -146,54 +147,49 @@ function App() {
 
   return (
     <div className="app">
-      <h1>STM: retry {"\u2192"} wake</h1>
+      <h1>Convex STM</h1>
       <p className="subtitle">
-        Orders block when out of stock and <strong>auto-complete</strong> when
-        restocked. No polling. That's what mutations can't do.
+        Orders that wait for stock and auto-complete when it arrives.
+        <br />
+        No polling. No subscriptions. No plumbing.
       </p>
 
       <Stock />
 
       <button className="reset-btn" onClick={() => setup({})}>
-        Reset (stock to 0, clear orders)
+        Reset everything
       </button>
 
       <Orders />
 
       <BuyPanel />
-      <OrElsePanel />
+      <SelectPanel />
       <RestockPanel />
 
       <div className="panel code">
-        <h2>How It Works</h2>
-        <pre>{`// The building block. A plain function.
-async function buy(tx, item, amount) {
-  const stock = await tx.read(item);
-  if (stock < amount) tx.retry();  // ← blocks until stock changes
-  tx.write(item, stock - amount);
+        <h2>The code</h2>
+        <pre>{`// A reusable building block. Just a function.
+async function buyFrom(tx, warehouse, amount) {
+  const stock = await tx.read(warehouse);
+  if (stock < amount) tx.retry();   // wait until restocked
+  tx.write(warehouse, stock - amount);
 }
 
-// Place an order. If stock=0, the order goes "pending".
-// The onRetry callback is stored in the DB as a waiter.
+// Order from a specific warehouse.
+// If empty, the order waits and auto-completes on restock.
 await stm.atomic(ctx, async (tx) => {
-  await buy(tx, "widgets", 1);
-}, { callbackHandle: retryOrder, callbackArgs: { orderId } });
-
-// Restock. commit() writes the TVar, finds waiters, fires callbacks.
-// retryOrder re-runs the transaction. This time stock > 0 → commits.
-await stm.atomic(ctx, async (tx) => {
-  const stock = await tx.read("widgets");
-  tx.write("widgets", stock + 5);
+  await buyFrom(tx, "us-west", 1);
 });
 
-// orElse: buy widget, else gadget. Blocks on BOTH watch sets.
-// Restocking EITHER one wakes the order.
+// Order from any warehouse. Tries each in order.
+// If all empty, waits for ANY of them to restock.
 await stm.atomic(ctx, async (tx) => {
-  return await tx.orElse(
-    async () => { await buy(tx, "widgets", 1); return "widgets"; },
-    async () => { await buy(tx, "gadgets", 1); return "gadgets"; },
+  return await tx.select(
+    async () => { await buyFrom(tx, "us-west", 1);    return "us-west"; },
+    async () => { await buyFrom(tx, "eu-central", 1); return "eu-central"; },
+    async () => { await buyFrom(tx, "asia-east", 1);  return "asia-east"; },
   );
-}, { callbackHandle, callbackArgs });`}</pre>
+});`}</pre>
       </div>
     </div>
   );
