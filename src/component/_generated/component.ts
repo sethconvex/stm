@@ -64,5 +64,12 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         any,
         Name
       >;
+      scheduleTimeout: FunctionReference<
+        "mutation",
+        "internal",
+        { key: string; ms: number },
+        null,
+        Name
+      >;
     };
   };

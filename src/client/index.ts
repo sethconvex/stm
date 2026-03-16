@@ -6,9 +6,12 @@ import type { ComponentApi } from "../component/_generated/component.js";
 
 // ── Public types ───────────────────────────────────────────────────────
 
+export type SelectBranch<T> =
+  | (() => Promise<T>)
+  | { fn: () => Promise<T>; timeout?: number };
+
 /**
  * Transaction context passed to the user's STM handler function.
- * Provides read, write, retry, and orElse.
  */
 export interface TX {
   /** Read a TVar. Returns null if uninitialized. Fetched on demand. */
@@ -19,8 +22,20 @@ export interface TX {
   retry(): never;
   /** Try fn1; if it retries, discard its writes and try fn2. */
   orElse<T>(fn1: () => Promise<T>, fn2: () => Promise<T>): Promise<T>;
-  /** Try alternatives in order. First one that doesn't retry wins. */
-  select<T>(...fns: (() => Promise<T>)[]): Promise<T>;
+  /**
+   * Try alternatives in order. First one that doesn't retry wins.
+   * Branches can have an optional timeout (ms). If a branch is waiting
+   * and the timeout fires, it's treated as a retry → next branch.
+   *
+   * ```ts
+   * await tx.select(
+   *   { fn: () => tryProvider(tx, "printful"), timeout: 3000 },
+   *   { fn: () => tryProvider(tx, "printify"), timeout: 5000 },
+   *   async () => tryProvider(tx, "gooten"),  // no timeout
+   * );
+   * ```
+   */
+  select<T>(...branches: SelectBranch<T>[]): Promise<T>;
 }
 
 export type STMHandler<T> = (tx: TX) => Promise<T>;
@@ -28,7 +43,11 @@ export type STMHandler<T> = (tx: TX) => Promise<T>;
 /** Returned by atomic() when the transaction called retry(). */
 export type STMResult<T> =
   | { status: "committed"; value: T }
-  | { status: "retry"; readSet: Record<string, unknown> };
+  | {
+      status: "retry";
+      readSet: Record<string, unknown>;
+      timeouts: { key: string; ms: number }[];
+    };
 
 // ── RetrySignal ────────────────────────────────────────────────────────
 
@@ -45,6 +64,8 @@ function isRetrySignal(e: unknown): e is RetrySignal {
 class TXImpl implements TX {
   readSet: Record<string, unknown> = {};
   writeSet: Record<string, unknown> = {};
+  // Timeout TVars to schedule if the transaction retries
+  pendingTimeouts: { key: string; ms: number }[] = [];
 
   constructor(
     private ctx: MutationCtx,
@@ -52,11 +73,8 @@ class TXImpl implements TX {
   ) {}
 
   async read(key: string): Promise<unknown> {
-    // Read-your-writes: check writeSet first.
     if (key in this.writeSet) return this.writeSet[key];
-    // Already read in this transaction? Return cached value.
     if (key in this.readSet) return this.readSet[key];
-    // Fetch on demand — within the parent mutation's OCC transaction.
     const val = await this.ctx.runQuery(this.component.lib.readTVar, { key });
     this.readSet[key] = val;
     return val;
@@ -71,32 +89,52 @@ class TXImpl implements TX {
   }
 
   async orElse<T>(fn1: () => Promise<T>, fn2: () => Promise<T>): Promise<T> {
-    // Save current state.
     const savedReadSet = { ...this.readSet };
     const savedWriteSet = { ...this.writeSet };
+    const savedTimeouts = [...this.pendingTimeouts];
 
     try {
       return await fn1();
     } catch (e) {
       if (!isRetrySignal(e)) throw e;
-
-      // fn1 retried. Keep its reads (for the combined watch set),
-      // but discard its writes.
       const fn1Reads = { ...this.readSet };
       this.readSet = savedReadSet;
       this.writeSet = savedWriteSet;
+      this.pendingTimeouts = savedTimeouts;
       Object.assign(this.readSet, fn1Reads);
-
-      // Try fn2. If it also retries, the RetrySignal propagates
-      // with the merged readSet covering both branches.
       return await fn2();
     }
   }
 
-  async select<T>(...fns: (() => Promise<T>)[]): Promise<T> {
-    if (fns.length === 0) this.retry();
-    if (fns.length === 1) return await fns[0]();
-    // foldr1 orElse: try each in order, fall back on retry
+  async select<T>(...branches: SelectBranch<T>[]): Promise<T> {
+    if (branches.length === 0) this.retry();
+    if (branches.length === 1) {
+      const b = branches[0];
+      return typeof b === "function" ? await b() : await b.fn();
+    }
+
+    // Wrap each branch: if it has a timeout, read a timeout TVar so it's
+    // in the read set, and register the timeout for scheduling on retry.
+    const fns = branches.map((b) => {
+      if (typeof b === "function") return b;
+      const { fn, timeout } = b;
+      if (!timeout) return fn;
+
+      return async () => {
+        // Generate a unique timeout TVar key for this branch
+        const timeoutKey = `__timeout:${Math.random().toString(36).slice(2)}`;
+        // Read the timeout TVar — puts it in the read set
+        const timedOut = await this.read(timeoutKey);
+        if (timedOut) {
+          // Timeout fired — treat as retry (skip this branch)
+          this.retry();
+        }
+        // Register: if we block, schedule writing this TVar after `timeout` ms
+        this.pendingTimeouts.push({ key: timeoutKey, ms: timeout });
+        return await fn();
+      };
+    });
+
     return await fns.reduceRight(
       (rest, fn) => async () => await this.orElse(fn, rest),
     )();
@@ -107,33 +145,9 @@ class TXImpl implements TX {
 
 type MutationCtx = GenericMutationCtx<GenericDataModel>;
 
-/**
- * The STM client. Instantiate once with `new STM(components.stm)`.
- *
- * Usage:
- * ```ts
- * const stm = new STM(components.stm);
- *
- * export const transfer = mutation(async (ctx) => {
- *   const result = await stm.atomic(ctx, async (tx) => {
- *     const a = await tx.read("account-a") as number;
- *     const b = await tx.read("account-b") as number;
- *     if (a < 100) tx.retry();
- *     tx.write("account-a", a - 100);
- *     tx.write("account-b", b + 100);
- *     return "transferred";
- *   });
- * });
- * ```
- */
 export class STM {
   constructor(private component: ComponentApi) {}
 
-  /**
-   * Run a transaction. TVars are fetched on demand — no need to
-   * declare keys upfront. All reads happen within the parent mutation's
-   * OCC transaction, so they're consistent with the commit.
-   */
   async run<T>(
     ctx: MutationCtx,
     handler: STMHandler<T>,
@@ -145,12 +159,15 @@ export class STM {
       value = await handler(tx);
     } catch (e) {
       if (isRetrySignal(e)) {
-        return { status: "retry", readSet: tx.readSet };
+        return {
+          status: "retry",
+          readSet: tx.readSet,
+          timeouts: tx.pendingTimeouts,
+        };
       }
-      throw e; // Propagate non-retry exceptions (abort semantics).
+      throw e;
     }
 
-    // Commit — apply all writes atomically.
     const writes = Object.entries(tx.writeSet).map(([key, val]) => ({
       key,
       value: val,
@@ -162,15 +179,6 @@ export class STM {
     return { status: "committed", value };
   }
 
-  /**
-   * Run a transaction atomically. Convenience wrapper around run().
-   *
-   * Returns { committed: true, value } on success,
-   * or { committed: false } if the handler called retry().
-   *
-   * If onRetry is provided, registers waiters so the caller is woken
-   * when a watched TVar changes.
-   */
   async atomic<T>(
     ctx: MutationCtx,
     handler: STMHandler<T>,
@@ -196,17 +204,22 @@ export class STM {
         callbackHandle: onRetry.callbackHandle,
         callbackArgs: onRetry.callbackArgs,
       });
-      if (!safeToBlock) {
-        return { committed: false };
+
+      if (safeToBlock) {
+        // Schedule timeouts: write the timeout TVar after N ms,
+        // which wakes the waiter → transaction re-runs → sees timedOut=true → skips branch
+        for (const { key, ms } of result.timeouts) {
+          await ctx.runMutation(this.component.lib.scheduleTimeout, {
+            key,
+            ms,
+          });
+        }
       }
     }
 
     return { committed: false };
   }
 
-  /**
-   * Initialize a TVar if it doesn't already exist.
-   */
   async init(ctx: MutationCtx, key: string, value: unknown): Promise<void> {
     await ctx.runMutation(this.component.lib.init, { key, value });
   }

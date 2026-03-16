@@ -2,7 +2,7 @@ import { mutation, query, internalMutation, internalAction, httpAction } from ".
 import { components, internal } from "./_generated/api.js";
 import { STM } from "@convex-dev/stm";
 import { v } from "convex/values";
-import type { TX } from "@convex-dev/stm";
+import type { TX, SelectBranch } from "@convex-dev/stm";
 
 const stm = new STM(components.stm);
 
@@ -60,9 +60,16 @@ async function fulfillCart(tx: TX, orderId: string, items: string[]) {
 
   for (const item of items) {
     const providers = providersFor(item);
-    const result = await tx.select(
-      ...providers.map((p) => async () => await tryProvider(tx, orderId, item, p)),
-    );
+    // Build branches with per-provider timeout from TVars
+    const branches: SelectBranch<{ next: "submit" | "done"; item: string; provider: string }>[] = [];
+    for (const p of providers) {
+      const timeout = ((await tx.read(`provider:${p}:timeout`)) as number) ?? 5000;
+      branches.push({
+        fn: async () => await tryProvider(tx, orderId, item, p),
+        timeout,
+      });
+    }
+    const result = await tx.select(...branches);
     plan.push(result);
   }
 
@@ -150,43 +157,23 @@ export const submitToProvider = internalAction({
     provider: v.string(),
   },
   handler: async (ctx, { orderId, items, item, provider }) => {
-    // Read provider settings
+    // Read provider failure rate
     const failRate = ((await ctx.runQuery(components.stm.lib.readTVar, {
       key: `provider:${provider}:failRate`,
     })) as number) ?? 30;
-    const timeout = ((await ctx.runQuery(components.stm.lib.readTVar, {
-      key: `provider:${provider}:timeout`,
-    })) as number) ?? 5000;
 
-    // Schedule a timeout — if provider doesn't respond in time, write "timeout"
-    await ctx.scheduler.runAfter(timeout, internal.example.handleTimeout, {
-      orderId, items, item, provider,
-    });
+    // Simulate provider API (1-3s delay)
+    await new Promise((r) => setTimeout(r, 1000 + Math.random() * 2000));
 
-    // Simulate provider API — random delay up to 2x the timeout
-    const responseTime = Math.random() * timeout * 2;
-    await new Promise((r) => setTimeout(r, responseTime));
-
-    // Provider responds (if we haven't timed out yet)
-    const result = Math.random() * 100 >= failRate ? "accepted" : "rejected";
-    await ctx.runMutation(internal.example.handleAndRetry, {
-      orderId, items, item, provider, result,
-    });
-  },
-});
-
-// Timeout handler — fires if provider takes too long
-export const handleTimeout = internalMutation({
-  args: { orderId: v.string(), items: v.string(), item: v.string(), provider: v.string() },
-  handler: async (ctx, { orderId, items, item, provider }) => {
-    // Only write timeout if still in "submitted" state (not already responded)
+    // Check if we were already timed out (the STM timeout TVar fired)
     const current = await ctx.runQuery(components.stm.lib.readTVar, {
       key: `order:${orderId}:${item}:${provider}`,
     });
-    if (current !== "submitted") return; // Already got a response, ignore
+    if (current !== "submitted") return; // Timed out or already handled
 
+    const result = Math.random() * 100 >= failRate ? "accepted" : "rejected";
     await ctx.runMutation(internal.example.handleAndRetry, {
-      orderId, items, item, provider, result: "timeout",
+      orderId, items, item, provider, result,
     });
   },
 });

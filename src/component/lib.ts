@@ -1,5 +1,6 @@
 import { v } from "convex/values";
-import { mutation, query } from "./_generated/server.js";
+import { internalMutation, mutation, query } from "./_generated/server.js";
+import { internal } from "./_generated/api.js";
 import type { Id } from "./_generated/dataModel.js";
 
 // ── Reads ──────────────────────────────────────────────────────────────
@@ -154,6 +155,59 @@ export const init = mutation({
     if (!existing) {
       await ctx.db.insert("tvars", { key, value });
     }
+    return null;
+  },
+});
+
+// ── Timeout scheduling ─────────────────────────────────────────────────
+
+/**
+ * Schedule writing a TVar after a delay. Used by select() with timeout.
+ * When the timeout fires, it writes the TVar → wakes any waiters.
+ * If the transaction already completed, the write is harmless (no waiters).
+ */
+export const scheduleTimeout = mutation({
+  args: { key: v.string(), ms: v.number() },
+  returns: v.null(),
+  handler: async (ctx, { key, ms }) => {
+    await ctx.scheduler.runAfter(ms, internal.lib.fireTimeout, { key });
+    return null;
+  },
+});
+
+export const fireTimeout = internalMutation({
+  args: { key: v.string() },
+  returns: v.null(),
+  handler: async (ctx, { key }) => {
+    // Write the timeout TVar. This wakes any waiter watching it.
+    const existing = await ctx.db
+      .query("tvars")
+      .withIndex("by_key", (q) => q.eq("key", key))
+      .unique();
+    if (existing) {
+      await ctx.db.patch(existing._id, { value: true });
+    } else {
+      await ctx.db.insert("tvars", { key, value: true });
+    }
+
+    // Wake all waiters on this TVar.
+    const waiters = await ctx.db
+      .query("waiters")
+      .withIndex("by_tvar", (q) => q.eq("tvarKey", key))
+      .collect();
+    for (const w of waiters) {
+      try {
+        await ctx.scheduler.runAfter(
+          0,
+          w.callbackHandle as any,
+          w.callbackArgs ?? {},
+        );
+      } catch {
+        // Stale handle
+      }
+      await ctx.db.delete(w._id);
+    }
+
     return null;
   },
 });
