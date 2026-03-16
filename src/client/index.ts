@@ -24,23 +24,52 @@ export interface TX {
   orElse<T>(fn1: () => Promise<T>, fn2: () => Promise<T>): Promise<T>;
   /**
    * Try alternatives in order. First one that doesn't retry wins.
-   * Branches can have an optional timeout (ms). If a branch is waiting
-   * and the timeout fires, it's treated as a retry → next branch.
-   *
-   * ```ts
-   * await tx.select(
-   *   { fn: () => tryProvider(tx, "printful"), timeout: 3000 },
-   *   { fn: () => tryProvider(tx, "printify"), timeout: 5000 },
-   *   async () => tryProvider(tx, "gooten"),  // no timeout
-   * );
-   * ```
+   * Branches can have an optional timeout (ms).
    */
   select<T>(...branches: SelectBranch<T>[]): Promise<T>;
+
+  // ── TMVar: a TVar that can be empty or full ──────────────────────
+  // Like Haskell's TMVar. Blocks on take-from-empty and put-to-full.
+
+  /**
+   * Take a value from a TMVar. Blocks if empty.
+   * Leaves the TMVar empty after taking.
+   */
+  take(key: string): Promise<unknown>;
+  /**
+   * Put a value into a TMVar. Blocks if already full.
+   */
+  put(key: string, value: unknown): Promise<void>;
+  /**
+   * Try to take without blocking. Returns { value } or null.
+   */
+  tryTake(key: string): Promise<{ value: unknown } | null>;
+  /**
+   * Try to put without blocking. Returns true if successful.
+   */
+  tryPut(key: string, value: unknown): Promise<boolean>;
+
+  // ── afterCommit: schedule IO after the transaction succeeds ──────
+
+  /**
+   * Register a callback to run after the transaction commits.
+   * Use this to schedule IO (fetch, actions) that should only
+   * happen if the transaction succeeds.
+   *
+   * ```ts
+   * await stm.atomic(ctx, async (tx) => {
+   *   tx.write("order:status", "submitted");
+   *   tx.afterCommit(async (ctx) => {
+   *     await ctx.scheduler.runAfter(0, api.actions.callProvider, {});
+   *   });
+   * });
+   * ```
+   */
+  afterCommit(fn: (ctx: MutationCtx) => Promise<void>): void;
 }
 
 export type STMHandler<T> = (tx: TX) => Promise<T>;
 
-/** Returned by atomic() when the transaction called retry(). */
 export type STMResult<T> =
   | { status: "committed"; value: T }
   | {
@@ -59,13 +88,30 @@ function isRetrySignal(e: unknown): e is RetrySignal {
   return e instanceof RetrySignal;
 }
 
+// ── TMVar encoding ─────────────────────────────────────────────────────
+// A TMVar uses a regular TVar with a wrapper:
+//   { __tmvar: true, empty: true }           — empty
+//   { __tmvar: true, empty: false, value }   — full
+
+const TMVAR_EMPTY = { __tmvar: true, empty: true };
+
+function tmvarFull(value: unknown) {
+  return { __tmvar: true, empty: false, value };
+}
+
+function isTMVarState(v: unknown): v is { __tmvar: true; empty: boolean; value?: unknown } {
+  return v !== null && typeof v === "object" && (v as any).__tmvar === true;
+}
+
 // ── Transaction context implementation ─────────────────────────────────
+
+type MutationCtx = GenericMutationCtx<GenericDataModel>;
 
 class TXImpl implements TX {
   readSet: Record<string, unknown> = {};
   writeSet: Record<string, unknown> = {};
-  // Timeout TVars to schedule if the transaction retries
   pendingTimeouts: { key: string; ms: number }[] = [];
+  afterCommitCallbacks: ((ctx: MutationCtx) => Promise<void>)[] = [];
 
   constructor(
     private ctx: MutationCtx,
@@ -92,6 +138,7 @@ class TXImpl implements TX {
     const savedReadSet = { ...this.readSet };
     const savedWriteSet = { ...this.writeSet };
     const savedTimeouts = [...this.pendingTimeouts];
+    const savedCallbacks = [...this.afterCommitCallbacks];
 
     try {
       return await fn1();
@@ -101,6 +148,7 @@ class TXImpl implements TX {
       this.readSet = savedReadSet;
       this.writeSet = savedWriteSet;
       this.pendingTimeouts = savedTimeouts;
+      this.afterCommitCallbacks = savedCallbacks;
       Object.assign(this.readSet, fn1Reads);
       return await fn2();
     }
@@ -113,23 +161,15 @@ class TXImpl implements TX {
       return typeof b === "function" ? await b() : await b.fn();
     }
 
-    // Wrap each branch: if it has a timeout, read a timeout TVar so it's
-    // in the read set, and register the timeout for scheduling on retry.
     const fns = branches.map((b) => {
       if (typeof b === "function") return b;
       const { fn, timeout } = b;
       if (!timeout) return fn;
 
       return async () => {
-        // Generate a unique timeout TVar key for this branch
         const timeoutKey = `__timeout:${Math.random().toString(36).slice(2)}`;
-        // Read the timeout TVar — puts it in the read set
         const timedOut = await this.read(timeoutKey);
-        if (timedOut) {
-          // Timeout fired — treat as retry (skip this branch)
-          this.retry();
-        }
-        // Register: if we block, schedule writing this TVar after `timeout` ms
+        if (timedOut) this.retry();
         this.pendingTimeouts.push({ key: timeoutKey, ms: timeout });
         return await fn();
       };
@@ -139,11 +179,44 @@ class TXImpl implements TX {
       (rest, fn) => async () => await this.orElse(fn, rest),
     )();
   }
+
+  // ── TMVar operations ───────────────────────────────────────────────
+
+  async take(key: string): Promise<unknown> {
+    const state = await this.read(key);
+    if (!isTMVarState(state) || state.empty) this.retry(); // empty — block
+    this.write(key, TMVAR_EMPTY); // take it — leave empty
+    return state.value;
+  }
+
+  async put(key: string, value: unknown): Promise<void> {
+    const state = await this.read(key);
+    if (isTMVarState(state) && !state.empty) this.retry(); // full — block
+    this.write(key, tmvarFull(value));
+  }
+
+  async tryTake(key: string): Promise<{ value: unknown } | null> {
+    const state = await this.read(key);
+    if (!isTMVarState(state) || state.empty) return null;
+    this.write(key, TMVAR_EMPTY);
+    return { value: state.value };
+  }
+
+  async tryPut(key: string, value: unknown): Promise<boolean> {
+    const state = await this.read(key);
+    if (isTMVarState(state) && !state.empty) return false;
+    this.write(key, tmvarFull(value));
+    return true;
+  }
+
+  // ── afterCommit ────────────────────────────────────────────────────
+
+  afterCommit(fn: (ctx: MutationCtx) => Promise<void>): void {
+    this.afterCommitCallbacks.push(fn);
+  }
 }
 
 // ── STM Client ─────────────────────────────────────────────────────────
-
-type MutationCtx = GenericMutationCtx<GenericDataModel>;
 
 export class STM {
   constructor(private component: ComponentApi) {}
@@ -168,12 +241,18 @@ export class STM {
       throw e;
     }
 
+    // Commit writes
     const writes = Object.entries(tx.writeSet).map(([key, val]) => ({
       key,
       value: val,
     }));
     if (writes.length > 0) {
       await ctx.runMutation(this.component.lib.commit, { writes });
+    }
+
+    // Run afterCommit callbacks
+    for (const cb of tx.afterCommitCallbacks) {
+      await cb(ctx);
     }
 
     return { status: "committed", value };
@@ -193,7 +272,6 @@ export class STM {
       return { committed: true, value: result.value };
     }
 
-    // Transaction retried. Register waiters if callback provided.
     if (onRetry) {
       const reads = Object.entries(result.readSet).map(([key, val]) => ({
         key,
@@ -206,8 +284,6 @@ export class STM {
       });
 
       if (safeToBlock) {
-        // Schedule timeouts: write the timeout TVar after N ms,
-        // which wakes the waiter → transaction re-runs → sees timedOut=true → skips branch
         for (const { key, ms } of result.timeouts) {
           await ctx.runMutation(this.component.lib.scheduleTimeout, {
             key,
@@ -220,7 +296,18 @@ export class STM {
     return { committed: false };
   }
 
+  /** Initialize a TVar. No-op if it already exists. */
   async init(ctx: MutationCtx, key: string, value: unknown): Promise<void> {
     await ctx.runMutation(this.component.lib.init, { key, value });
+  }
+
+  /** Initialize a TMVar as empty. */
+  async initTMVar(ctx: MutationCtx, key: string): Promise<void> {
+    await ctx.runMutation(this.component.lib.init, { key, value: TMVAR_EMPTY });
+  }
+
+  /** Initialize a TMVar with a value (full). */
+  async initTMVarFull(ctx: MutationCtx, key: string, value: unknown): Promise<void> {
+    await ctx.runMutation(this.component.lib.init, { key, value: tmvarFull(value) });
   }
 }

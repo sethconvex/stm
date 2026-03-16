@@ -27,9 +27,11 @@ function providersFor(product: string) {
 //  STM building blocks
 // ═══════════════════════════════════════════════════════════════════════
 
-// Phase 1: Submit to all providers. Commits so actions can be dispatched.
+// Phase 1: Submit to all providers.
+// Uses afterCommit to schedule the fetch() calls — they only fire
+// if the transaction commits. No manual two-phase dispatch needed.
 async function submitAll(tx: TX, orderId: string, items: string[]) {
-  const toSubmit: { item: string; provider: string }[] = [];
+  let submitted = false;
 
   for (const item of items) {
     for (const p of providersFor(item)) {
@@ -38,12 +40,22 @@ async function submitAll(tx: TX, orderId: string, items: string[]) {
       const status = await tx.read(`${orderId}:${item}:${p}`);
       if (!status || status === "rejected") {
         tx.write(`${orderId}:${item}:${p}`, "submitted");
-        toSubmit.push({ item, provider: p });
+        submitted = true;
+
+        // Schedule the IO — only runs if this transaction commits
+        tx.afterCommit(async (ctx) => {
+          await ctx.scheduler.runAfter(0, internal.providerAction.submitToProvider, {
+            orderId: orderId as string,
+            items: JSON.stringify(items),
+            item,
+            provider: p,
+          });
+        });
       }
     }
   }
 
-  return toSubmit;
+  return submitted;
 }
 
 // Phase 2: Wait for results using select() with timeout.
@@ -99,23 +111,15 @@ async function runOrder(ctx: any, orderId: any, items: string[], timeoutMs?: num
   const order = await ctx.db.get(orderId);
   if (!order || order.status === "fulfilled" || order.status === "expired") return;
 
-  // Phase 1: Submit to all providers (always commits)
+  // Phase 1: Submit to all providers
+  // afterCommit handles the IO dispatch — no manual loop needed
   const submitResult = await stm.atomic(ctx, async (tx: TX) => submitAll(tx, orderId, items));
-  if (submitResult.committed && submitResult.value.length > 0) {
+  if (submitResult.committed && submitResult.value) {
     await ctx.db.patch(orderId, { status: "submitted" });
-    for (const { item, provider } of submitResult.value) {
-      await ctx.scheduler.runAfter(0, internal.providerAction.submitToProvider, {
-        orderId: orderId as string,
-        items: JSON.stringify(items),
-        item,
-        provider,
-      });
-    }
   }
 
-  // Phase 2: Check if all items have a winner (select with timeout)
+  // Phase 2: Wait for results (select with timeout)
   const waitResult = await stm.atomic(ctx, async (tx: TX) => awaitResults(tx, orderId, items, timeoutMs));
-
   if (waitResult.committed) {
     await ctx.db.patch(orderId, { status: "fulfilled", assignments: waitResult.value });
   } else if (timeoutMs) {
