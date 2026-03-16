@@ -162,8 +162,33 @@ export const init = mutation({
 // ── Cleanup ────────────────────────────────────────────────────────────
 
 /**
- * Delete TVars by key. Used to clean up timeout TVars after a
- * transaction commits (they're no longer needed).
+ * Delete all TVars whose key starts with the given prefix.
+ * Use this to clean up per-order TVars when an order is done.
+ */
+export const cleanupPrefix = mutation({
+  args: { prefix: v.string() },
+  returns: v.null(),
+  handler: async (ctx, { prefix }) => {
+    // Scan TVars for matching prefix (indexed by key, so range query works)
+    const tvars = await ctx.db
+      .query("tvars")
+      .withIndex("by_key", (q) => q.gte("key", prefix).lt("key", prefix + "\uffff"))
+      .take(500);
+    for (const t of tvars) await ctx.db.delete(t._id);
+    // Also clean waiters
+    for (const t of tvars) {
+      const waiters = await ctx.db
+        .query("waiters")
+        .withIndex("by_tvar", (q) => q.eq("tvarKey", t.key))
+        .collect();
+      for (const w of waiters) await ctx.db.delete(w._id);
+    }
+    return null;
+  },
+});
+
+/**
+ * Delete TVars by exact key. Used to clean up timeout TVars.
  */
 export const cleanupKeys = mutation({
   args: { keys: v.array(v.string()) },
@@ -248,14 +273,30 @@ export const fireTimeout = internalMutation({
 /**
  * Delete all TVars and waiters. Useful for resetting state.
  */
+async function clearAllImpl(ctx: any) {
+  const tvarBatch = await ctx.db.query("tvars").take(500);
+  for (const t of tvarBatch) await ctx.db.delete(t._id);
+  const waiterBatch = await ctx.db.query("waiters").take(500);
+  for (const w of waiterBatch) await ctx.db.delete(w._id);
+  if (tvarBatch.length === 500 || waiterBatch.length === 500) {
+    await ctx.scheduler.runAfter(0, internal.lib.clearAllContinue, {});
+  }
+}
+
 export const clearAll = mutation({
   args: {},
   returns: v.null(),
   handler: async (ctx) => {
-    const tvars = await ctx.db.query("tvars").collect();
-    for (const t of tvars) await ctx.db.delete(t._id);
-    const waiters = await ctx.db.query("waiters").collect();
-    for (const w of waiters) await ctx.db.delete(w._id);
+    await clearAllImpl(ctx);
+    return null;
+  },
+});
+
+export const clearAllContinue = internalMutation({
+  args: {},
+  returns: v.null(),
+  handler: async (ctx) => {
+    await clearAllImpl(ctx);
     return null;
   },
 });

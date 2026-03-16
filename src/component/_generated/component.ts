@@ -42,6 +42,13 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         null,
         Name
       >;
+      cleanupPrefix: FunctionReference<
+        "mutation",
+        "internal",
+        { prefix: string },
+        null,
+        Name
+      >;
       clearAll: FunctionReference<"mutation", "internal", {}, null, Name>;
       commit: FunctionReference<
         "mutation",

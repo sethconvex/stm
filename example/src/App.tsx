@@ -34,20 +34,20 @@ const ALL_ON: SetupCfg = {
 
 const STEPS = [
   {
-    title: "Meet the providers",
-    body: "Three print providers, each making different products. Printful makes shirts + mugs. Printify makes shirts + posters. Gooten makes mugs + posters. Click a card to toggle online/offline.",
+    title: "The setup",
+    body: "Three print providers, each making different products. No single provider makes everything. The STM transaction figures out who makes what and races them all.",
     action: null,
     setup: ALL_ON,
   },
   {
-    title: "Order a shirt",
-    body: "All providers online, 0% failure. We race all capable providers simultaneously. First to accept wins.",
+    title: "retry \u2014 wait for what you need",
+    body: "Order a shirt. The transaction reads each provider's status. If a provider hasn't responded yet, it calls retry() \u2014 \"I can't proceed, wake me when something changes.\" When the provider webhooks back, the TVar updates and the transaction re-runs automatically.",
     action: { type: "order" as const, items: ["shirt"] },
     setup: ALL_ON,
   },
   {
-    title: "Printful always rejects",
-    body: "Printful at 100% failure. Both Printful and Printify get the request, but Printful rejects. Printify wins by default.",
+    title: "select \u2014 try alternatives",
+    body: "Printful now rejects everything. select() tries Printful, sees the rejection (retry), rolls back, tries Printify. First provider to accept wins. The caller doesn't need to know which provider worked.",
     action: { type: "order" as const, items: ["shirt"] },
     setup: {
       printful: { online: true, rate: 100, maxDelay: 5000 },
@@ -56,14 +56,14 @@ const STEPS = [
     },
   },
   {
-    title: "Full catalog",
-    body: "Shirt + mug + poster. No single provider makes all three. All providers are raced per item. First to accept each item wins. The whole cart completes atomically.",
+    title: "Atomic composition \u2014 all or nothing",
+    body: "Shirt + mug + poster. No single provider makes all three. The transaction sources each item independently, but the whole cart is atomic \u2014 if the poster can't be sourced, the shirt and mug don't ship either.",
     action: { type: "order" as const, items: ["shirt", "mug", "poster"] },
     setup: ALL_ON,
   },
   {
-    title: "Printful offline",
-    body: "Printful completely offline. Shirts can only come from Printify, mugs only from Gooten.",
+    title: "afterCommit \u2014 IO after the transaction",
+    body: "The transaction can't call fetch() (Convex enforces this). Instead, afterCommit() schedules the provider API calls to run after the transaction commits. If the transaction retries, the callbacks are discarded \u2014 no wasted API calls.",
     action: { type: "order" as const, items: ["shirt", "mug"] },
     setup: {
       printful: { online: false, rate: 0, maxDelay: 5000 },
@@ -72,8 +72,8 @@ const STEPS = [
     },
   },
   {
-    title: "Chaos mode",
-    body: "All providers: 60% failure. We race them all, but most reject. Watch the providers light up as they accept items one by one.",
+    title: "Timeout \u2014 composable deadlines",
+    body: "Each select() branch can have a timeout. If a provider doesn't respond in time, that branch is skipped. If ALL providers time out for an item, the whole order expires. Timeout composes with retry and select \u2014 it's not a separate mechanism.",
     action: { type: "order" as const, items: ["shirt", "mug", "poster"] },
     setup: {
       printful: { online: true, rate: 60, maxDelay: 5000 },
@@ -82,10 +82,14 @@ const STEPS = [
     },
   },
   {
-    title: "The code",
-    body: "Race all providers, first to accept wins. Atomic winner selection via one TVar write. Idempotent on retry. No double-ordering.",
-    action: null,
-    setup: ALL_ON,
+    title: "Chaos \u2014 it all composes",
+    body: "60% failure across all providers. Orders bounce between providers, retrying and falling back. Despite the chaos, every order eventually ships \u2014 retry waits, select tries alternatives, afterCommit dispatches IO, timeout catches stragglers. All from the same composable primitives.",
+    action: { type: "order" as const, items: ["shirt", "mug", "poster"] },
+    setup: {
+      printful: { online: true, rate: 60, maxDelay: 5000 },
+      printify: { online: true, rate: 60, maxDelay: 5000 },
+      gooten:   { online: true, rate: 60, maxDelay: 5000 },
+    },
   },
 ];
 

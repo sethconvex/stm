@@ -114,6 +114,7 @@ export const expireOrder = internalMutation({
     const order = await ctx.db.get(orderId as Id<"orders">);
     if (!order || order.status === "fulfilled") return;
     await ctx.db.patch(order._id, { status: "expired" });
+    await ctx.runMutation(components.stm.lib.cleanupPrefix, { prefix: `${orderId}:` });
   },
 });
 
@@ -144,8 +145,11 @@ async function runOrder(ctx: MutationCtx, orderId: Id<"orders">, items: string[]
   );
   if (waitResult.committed) {
     await ctx.db.patch(orderId, { status: "fulfilled", assignments: waitResult.value });
+    // Clean up order TVars — no longer needed
+    await ctx.runMutation(components.stm.lib.cleanupPrefix, { prefix: `${orderId}:` });
   } else if (!waitResult.committed && waitResult.timedOut) {
     await ctx.db.patch(orderId, { status: "expired" });
+    await ctx.runMutation(components.stm.lib.cleanupPrefix, { prefix: `${orderId}:` });
   }
   // If not committed and not timed out: onRetry registered waiters + timeouts.
   // The transaction will re-run when a provider responds or a timeout fires.
@@ -259,6 +263,7 @@ export const setAvailable = mutation({
 export const setup = mutation({
   args: {},
   handler: async (ctx) => {
+    // Clear STM state (auto-continues if there's a lot)
     await ctx.runMutation(components.stm.lib.clearAll, {});
     await ctx.runMutation(components.stm.lib.commit, {
       writes: PROVIDERS.map((p) => ({ key: `provider:${p}:online`, value: true })),
