@@ -108,7 +108,10 @@ async function runFulfillment(ctx: any, orderId: any, items: string[]) {
 
   if (result.committed) {
     const plan = result.value;
-    const allDone = plan.every((p: any) => p.next === "done");
+    // ALL items must have a winner — not just the ones in the plan
+    const allDone = items.every((item) =>
+      plan.some((p: any) => p.item === item && p.next === "done"),
+    );
 
     if (allDone) {
       const assignments: Record<string, string> = {};
