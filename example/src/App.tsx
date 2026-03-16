@@ -3,14 +3,17 @@ import { useMutation, useQuery } from "convex/react";
 import { api } from "../convex/_generated/api";
 import { useState } from "react";
 
-const PROVIDERS = [
-  { key: "printful", label: "Printful", color: "#2563eb" },
-  { key: "printify", label: "Printify", color: "#16a34a" },
-  { key: "gooten", label: "Gooten", color: "#9333ea" },
+const PRODUCTS = [
+  { key: "shirt", emoji: "\uD83D\uDC55" },
+  { key: "mug", emoji: "\u2615" },
+  { key: "poster", emoji: "\uD83D\uDDBC\uFE0F" },
 ];
 
-const DESIGNS = ["Convex Logo Tee", "STM All-Stars", "Retry Until I Die"];
-const SIZES = ["S", "M", "L", "XL"];
+const PROVIDER_COLORS: Record<string, string> = {
+  printful: "#2563eb",
+  printify: "#16a34a",
+  gooten: "#9333ea",
+};
 
 function ProviderStatus() {
   const providers = useQuery(api.example.readProviders) ?? {};
@@ -18,18 +21,21 @@ function ProviderStatus() {
 
   return (
     <div className="providers">
-      {PROVIDERS.map((p) => {
-        const online = providers[p.key] ?? false;
+      {Object.entries(providers).map(([name, info]) => {
+        const p = info as { available: boolean; products: string[] };
         return (
           <button
-            key={p.key}
-            className={`provider-card ${online ? "online" : "offline"}`}
-            style={{ borderColor: online ? p.color : "#333" }}
-            onClick={() => toggle({ provider: p.key })}
+            key={name}
+            className={`provider-card ${p.available ? "online" : "offline"}`}
+            style={{ borderColor: p.available ? PROVIDER_COLORS[name] : "#333" }}
+            onClick={() => toggle({ provider: name })}
           >
-            <span className="provider-dot" style={{ background: online ? p.color : "#555" }} />
-            <span className="provider-name">{p.label}</span>
-            <span className="provider-status">{online ? "online" : "offline"}</span>
+            <span className="provider-dot" style={{ background: p.available ? PROVIDER_COLORS[name] : "#555" }} />
+            <span className="provider-name">{name}</span>
+            <span className="provider-products">
+              {p.products.map((pr) => PRODUCTS.find((x) => x.key === pr)?.emoji).join(" ")}
+            </span>
+            <span className="provider-status">{p.available ? "online" : "offline"}</span>
           </button>
         );
       })}
@@ -38,35 +44,48 @@ function ProviderStatus() {
 }
 
 function OrderForm() {
-  const orderShirt = useMutation(api.example.orderShirt);
-  const [design, setDesign] = useState(DESIGNS[0]);
-  const [size, setSize] = useState("L");
+  const placeOrder = useMutation(api.example.placeOrder);
+  const [cart, setCart] = useState<Set<string>>(new Set(["shirt"]));
   const [status, setStatus] = useState<string | null>(null);
 
+  const toggleItem = (item: string) => {
+    setCart((prev) => {
+      const next = new Set(prev);
+      if (next.has(item)) next.delete(item);
+      else next.add(item);
+      return next;
+    });
+  };
+
   const doOrder = async () => {
+    if (cart.size === 0) return;
     setStatus(null);
-    await orderShirt({ design, size });
-    setStatus("Order placed! Watch it get fulfilled below.");
+    await placeOrder({ items: [...cart] });
+    setStatus(`Order placed for ${[...cart].join(" + ")}!`);
   };
 
   return (
     <div className="panel">
-      <h2>Order a T-Shirt</h2>
-      <div className="row">
-        <label>
-          Design
-          <select value={design} onChange={(e) => setDesign(e.target.value)}>
-            {DESIGNS.map((d) => <option key={d} value={d}>{d}</option>)}
-          </select>
-        </label>
-        <label>
-          Size
-          <select value={size} onChange={(e) => setSize(e.target.value)}>
-            {SIZES.map((s) => <option key={s} value={s}>{s}</option>)}
-          </select>
-        </label>
-        <button onClick={doOrder}>Order</button>
+      <h2>Build Your Order</h2>
+      <p className="hint">
+        Pick multiple items. Each item is sourced from a provider that makes it.
+        The whole cart is fulfilled atomically — all items succeed or none do.
+      </p>
+      <div className="cart-picker">
+        {PRODUCTS.map((p) => (
+          <button
+            key={p.key}
+            className={`cart-item ${cart.has(p.key) ? "selected" : ""}`}
+            onClick={() => toggleItem(p.key)}
+          >
+            <span className="cart-emoji">{p.emoji}</span>
+            <span>{p.key}</span>
+          </button>
+        ))}
       </div>
+      <button onClick={doOrder} disabled={cart.size === 0}>
+        Order {[...cart].join(" + ")}
+      </button>
       {status && <div className="status">{status}</div>}
     </div>
   );
@@ -84,22 +103,25 @@ function OrderFeed() {
           <div className="order-header">
             <span className="order-dot" />
             <span className="order-item">
-              {o.design} ({o.size})
+              {o.items.map((i: string) => PRODUCTS.find((p) => p.key === i)?.emoji).join(" + ")}{" "}
+              {o.items.join(" + ")}
             </span>
             <span className="order-status">{o.status}</span>
-            {o.provider && (
-              <span className="order-provider">via {o.provider}</span>
-            )}
           </div>
+          {o.assignments && (
+            <div className="assignments">
+              {Object.entries(o.assignments as Record<string, string>).map(([item, provider]) => (
+                <span key={item} className="assignment" style={{ borderColor: PROVIDER_COLORS[provider] }}>
+                  {PRODUCTS.find((p) => p.key === item)?.emoji} {item} via {provider}
+                </span>
+              ))}
+            </div>
+          )}
           {o.attempts.length > 0 && (
             <div className="attempts">
-              {o.attempts.map((a, i) => (
-                <span
-                  key={i}
-                  className={`attempt ${a.result}`}
-                  title={`${a.provider}: ${a.result}`}
-                >
-                  {a.provider}: {a.result}
+              {o.attempts.map((a: any, i: number) => (
+                <span key={i} className={`attempt ${a.result}`}>
+                  {a.item}@{a.provider}: {a.result}
                 </span>
               ))}
             </div>
@@ -115,11 +137,10 @@ function App() {
 
   return (
     <div className="app">
-      <h1>T-Shirt Fulfillment</h1>
+      <h1>Multi-Item Fulfillment</h1>
       <p className="subtitle">
-        Orders try Printful first. If rejected, Printify. Then Gooten.
-        <br />
-        Toggle providers offline to see orders cascade to the next one.
+        Each provider makes different products. Orders are split across
+        providers <strong>atomically</strong> — all items succeed or none do.
       </p>
 
       <ProviderStatus />
@@ -132,32 +153,30 @@ function App() {
       <OrderFeed />
 
       <div className="panel code">
-        <h2>What's happening</h2>
-        <pre>{`// The building block. Pure logic, no IO.
-async function tryProvider(tx, orderId, provider) {
-  if (!await tx.read(\`provider:\${provider}:available\`))
-    tx.retry();  // offline — skip to next
+        <h2>Why this needs STM</h2>
+        <pre>{`// No single provider makes shirt + mug + poster.
+// The STM transaction sources EACH item from a capable provider.
+// If any item can't be fulfilled, the WHOLE order waits.
 
-  const result = await tx.read(\`order:\${orderId}:\${provider}\`);
-  if (result === null)      { tx.write(..., "submitted"); return provider; }
-  if (result === "submitted") tx.retry();  // waiting for webhook
-  if (result === "accepted")  return provider; // done!
-  tx.retry();  // rejected — skip to next
-}
-
-// Try each provider in order. First available wins.
-// If all fail, wait for ANY provider to change state.
 await stm.atomic(ctx, async (tx) => {
-  return await tx.select(
-    async () => tryProvider(tx, orderId, "printful"),
-    async () => tryProvider(tx, orderId, "printify"),
-    async () => tryProvider(tx, orderId, "gooten"),
-  );
+  for (const item of ["shirt", "mug", "poster"]) {
+    // select: try each capable provider for this item
+    await tx.select(
+      ...providersFor(item).map(p => async () => {
+        await tryProvider(tx, orderId, item, p);
+      })
+    );
+  }
 });
 
-// Provider API responds via webhook → writes the TVar
-// → wakes the blocked order → re-runs select()
-// → sees "rejected" → tries next provider automatically`}</pre>
+// Printful makes:  shirt, mug
+// Printify makes:  shirt, poster
+// Gooten makes:    mug, poster
+
+// "shirt + poster" → shirt from Printful, poster from Printify ✓
+// "shirt + mug + poster" → split across all three providers ✓
+// Turn Printful offline → shirt falls to Printify,
+//   mug falls to Gooten. Automatically. No code changes.`}</pre>
       </div>
     </div>
   );

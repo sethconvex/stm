@@ -3,17 +3,17 @@ import { v } from "convex/values";
 
 export default defineSchema({
   orders: defineTable({
-    design: v.string(),
-    size: v.string(),
+    items: v.array(v.string()),
     status: v.union(
       v.literal("pending"),
       v.literal("submitted"),
       v.literal("fulfilled"),
-      v.literal("failed"),
     ),
-    provider: v.optional(v.string()),
+    // Which provider is fulfilling each item: { "shirt": "printful", "mug": "gooten" }
+    assignments: v.optional(v.any()),
     attempts: v.array(
       v.object({
+        item: v.string(),
         provider: v.string(),
         result: v.string(),
         at: v.number(),

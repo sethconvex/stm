@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { initConvexTest } from "./setup.test";
 import { api } from "./_generated/api";
 
-describe("T-shirt fulfillment", () => {
+describe("Multi-item fulfillment", () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
 
@@ -10,27 +10,20 @@ describe("T-shirt fulfillment", () => {
     const t = initConvexTest();
     await t.mutation(api.example.setup, {});
 
-    await t.mutation(api.example.orderShirt, {
-      design: "Convex Logo Tee",
-      size: "L",
-    });
+    await t.mutation(api.example.placeOrder, { items: ["shirt", "mug"] });
 
     const orders = await t.query(api.example.listOrders, {});
     expect(orders.length).toBe(1);
-    // Order is either pending or submitted (depending on provider availability)
-    expect(["pending", "submitted"]).toContain(orders[0].status);
+    expect(orders[0].items).toEqual(["shirt", "mug"]);
   });
 
-  test("toggling provider updates availability", async () => {
+  test("providers have correct catalog", async () => {
     const t = initConvexTest();
     await t.mutation(api.example.setup, {});
 
-    let providers = await t.query(api.example.readProviders, {});
-    expect(providers["printful"]).toBe(true);
-
-    await t.mutation(api.example.toggleProvider, { provider: "printful" });
-
-    providers = await t.query(api.example.readProviders, {});
-    expect(providers["printful"]).toBe(false);
+    const providers = await t.query(api.example.readProviders, {});
+    expect(providers["printful"].products).toEqual(["shirt", "mug"]);
+    expect(providers["printify"].products).toEqual(["shirt", "poster"]);
+    expect(providers["gooten"].products).toEqual(["mug", "poster"]);
   });
 });
