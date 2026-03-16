@@ -73,12 +73,12 @@ const STEPS = [
   },
   {
     title: "Timeout \u2014 composable deadlines",
-    body: "Each select() branch can have a timeout. If a provider doesn't respond in time, that branch is skipped. If ALL providers time out for an item, the whole order expires. Timeout composes with retry and select \u2014 it's not a separate mechanism.",
-    action: { type: "order" as const, items: ["shirt", "mug", "poster"] },
+    body: "All providers at 100% failure \u2014 nothing will be accepted. The order has a 3s timeout. Watch it go pending \u2192 submitted \u2192 expired. The timeout composes with select and retry \u2014 it's not a separate mechanism.",
+    action: { type: "order-with-timeout" as const, items: ["shirt"], timeoutMs: 3000 },
     setup: {
-      printful: { online: true, rate: 60, maxDelay: 5000 },
-      printify: { online: true, rate: 60, maxDelay: 5000 },
-      gooten:   { online: true, rate: 60, maxDelay: 5000 },
+      printful: { online: true, rate: 100, maxDelay: 5000 },
+      printify: { online: true, rate: 100, maxDelay: 5000 },
+      gooten:   { online: true, rate: 100, maxDelay: 5000 },
     },
   },
   {
@@ -102,7 +102,7 @@ function Walkthrough({
   onSetAvailable,
   onReset,
 }: {
-  onOrder: (items: string[]) => void;
+  onOrder: (items: string[], timeoutMs?: number) => void;
   onSetRate: (provider: string, rate: number) => void;
   onSetMaxDelay: (provider: string, maxDelay: number) => void;
   onSetAvailable: (provider: string, available: boolean) => void;
@@ -143,8 +143,12 @@ function Walkthrough({
       <div className="walk-actions">
         <button className="walk-btn secondary" onClick={() => goTo(Math.max(0, step - 1))} disabled={step === 0}>Back</button>
         {current.action && (
-          <button className="walk-btn primary" onClick={() => onOrder(current.action!.items!)}>
+          <button className="walk-btn primary" onClick={() => onOrder(
+            current.action!.items!,
+            "timeoutMs" in current.action! ? (current.action as any).timeoutMs : undefined,
+          )}>
             Order {current.action.items!.join(" + ")}
+            {"timeoutMs" in current.action ? " (3s timeout)" : ""}
           </button>
         )}
         <button className="walk-btn secondary" onClick={() => goTo(Math.min(STEPS.length - 1, step + 1))} disabled={step === STEPS.length - 1}>Next</button>
@@ -415,7 +419,7 @@ function App() {
       <p className="subtitle">Multi-item fulfillment &mdash; race providers, first to accept wins</p>
 
       <Walkthrough
-        onOrder={(items) => placeOrder({ items })}
+        onOrder={(items, timeoutMs) => placeOrder({ items, timeoutMs })}
         onSetRate={(p, r) => setSettings({ provider: p, failRate: r })}
         onSetMaxDelay={(p, t) => setSettings({ provider: p, maxDelay: t })}
         onSetAvailable={(p, a) => setAvail({ provider: p, available: a })}
