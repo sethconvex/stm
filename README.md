@@ -169,8 +169,11 @@ const stm = new STM(components.stm);
 
 ## Demo
 
-The example app shows multi-item order fulfillment across three
-simulated print providers with real HTTP fetch + webhooks.
+**[Live demo](https://good-civet-579.convex.site)**
+
+Two interactive examples:
+- **Fulfillment** — multi-item orders across three print providers with fetch + webhooks
+- **Priority Queue** — TVars as queues with select-based priority consumption
 
 ```sh
 npm i
