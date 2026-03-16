@@ -207,7 +207,7 @@ function ProviderCard({ name, info, onToggle, onSetRate, onSetTimeout }: {
             <span className="slider-value">{localRate}%</span>
           </div>
           <div className="slider-row">
-            <span className="slider-label">Wait</span>
+            <span className="slider-label">Max wait</span>
             <input type="range" min={500} max={10000} step={500} value={localTimeout}
               onChange={(e) => { const v = Number(e.target.value); setLocalTimeout(v); debouncedSetTimeout(v); }}
               style={{ accentColor: PROVIDER_COLORS[name] }} />

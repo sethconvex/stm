@@ -122,13 +122,17 @@ async function runFulfillment(ctx: any, orderId: any, items: string[]) {
       for (const step of plan) {
 
         if (step.next === "submit-all") {
-          for (const provider of step.providers) {
-            console.log("scheduling submitToProvider:", step.item, provider);
+          for (const provider of step.providers!) {
+            // Read provider settings so the action can pass them to the mock
+            const failRate = ((await ctx.runQuery(components.stm.lib.readTVar, {
+              key: `provider:${provider}:failRate`,
+            })) as number) ?? 30;
             await ctx.scheduler.runAfter(0, internal.providerAction.submitToProvider, {
               orderId: orderId as string,
               items: JSON.stringify(items),
               item: step.item,
               provider,
+              failRate,
             });
           }
         }

@@ -36,7 +36,7 @@ h1 { text-align: center; font-size: 1.8rem; margin-bottom: 0.25rem; }
 .sliders { padding: 0.3rem 0.5rem 0.5rem; border-top: 1px solid #1a1a24; }
 .slider-row { display: flex; align-items: center; gap: 0.3rem; margin-bottom: 0.15rem; }
 .slider-row input { flex: 1; height: 4px; cursor: pointer; }
-.slider-label { font-size: 0.6rem; color: #555; width: 38px; text-transform: uppercase; letter-spacing: 0.03em; }
+.slider-label { font-size: 0.55rem; color: #555; width: 48px; text-transform: uppercase; letter-spacing: 0.03em; }
 .slider-value { font-size: 0.65rem; color: #888; min-width: 32px; text-align: right; font-variant-numeric: tabular-nums; }
 
 /* ── Panels ────────────────────────────────────────── */
