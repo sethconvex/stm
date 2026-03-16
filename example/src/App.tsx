@@ -280,35 +280,55 @@ function OrderFeed() {
   return (
     <div className="orders">
       <h2>Orders</h2>
-      {orders.map((o) => (
-        <div key={o._id} className={`order ${o.status}`}>
-          <div className="order-header">
-            <span className="order-dot" />
-            <span className="order-item">
-              {o.items.map((i: string) => PRODUCTS.find((p) => p.key === i)?.emoji).join("+")}
-            </span>
-            <span className="order-status">{o.status}</span>
+      {orders.map((o) => {
+        const assignments = (o.assignments ?? {}) as Record<string, string>;
+        const attempts = o.attempts as { item: string; provider: string; result: string }[];
+
+        return (
+          <div key={o._id} className={`order ${o.status}`}>
+            <div className="order-header">
+              <span className="order-dot" />
+              <span className="order-status">{o.status}</span>
+            </div>
+            <div className="order-items">
+              {o.items.map((item: string) => {
+                const emoji = PRODUCTS.find((p) => p.key === item)?.emoji ?? "?";
+                const winner = assignments[item];
+                const itemAttempts = attempts.filter((a) => a.item === item);
+
+                return (
+                  <div key={item} className="order-item-row">
+                    <span className="item-emoji">{emoji}</span>
+                    <span className="item-name">{item}</span>
+                    {winner ? (
+                      <span className="item-winner" style={{ color: PROVIDER_COLORS[winner] }}>
+                        {winner}
+                      </span>
+                    ) : (
+                      <span className="item-waiting">waiting...</span>
+                    )}
+                    <span className="item-attempts">
+                      {itemAttempts.map((a, i) => (
+                        <span
+                          key={i}
+                          className={`attempt-dot ${a.result}`}
+                          title={`${a.provider}: ${a.result}`}
+                          style={{
+                            background: a.result === "accepted"
+                              ? PROVIDER_COLORS[a.provider]
+                              : a.result === "canceled" ? "#555"
+                              : "#ef4444",
+                          }}
+                        />
+                      ))}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
           </div>
-          {o.assignments && (
-            <div className="assignments">
-              {Object.entries(o.assignments as Record<string, string>).map(([item, provider]) => (
-                <span key={item} className="assignment" style={{ borderColor: PROVIDER_COLORS[provider] }}>
-                  {PRODUCTS.find((p) => p.key === item)?.emoji} via {provider}
-                </span>
-              ))}
-            </div>
-          )}
-          {o.attempts.length > 0 && (
-            <div className="attempts">
-              {o.attempts.map((a: any, i: number) => (
-                <span key={i} className={`attempt ${a.result}`}>
-                  {PRODUCTS.find((p) => p.key === a.item)?.emoji}{a.provider}:{a.result === "accepted" ? "\u2713" : a.result === "canceled" ? "\u2718" : a.result === "timeout" ? "\u23F1" : "\u2717"}
-                </span>
-              ))}
-            </div>
-          )}
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }

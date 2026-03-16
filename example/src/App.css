@@ -88,15 +88,21 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 .order.submitted .order-status { color: #3b82f6; }
 .order.fulfilled .order-status { color: #22c55e; }
 
-.assignments { display: flex; gap: 0.3rem; margin-top: 0.3rem; flex-wrap: wrap; }
-.assignment {
-  font-size: 0.68rem; padding: 0.15rem 0.4rem; border-radius: 3px;
-  border: 1px solid; background: rgba(255,255,255,0.02); font-weight: 600;
+.order-items { margin-top: 0.35rem; }
+.order-item-row {
+  display: flex; align-items: center; gap: 0.4rem;
+  padding: 0.15rem 0; font-size: 0.82rem;
 }
-.attempts { display: flex; gap: 0.25rem; margin-top: 0.3rem; flex-wrap: wrap; }
-.attempt { font-size: 0.65rem; padding: 0.1rem 0.35rem; border-radius: 3px; font-weight: 600; }
-.attempt.accepted { background: rgba(34, 197, 94, 0.12); color: #22c55e; }
-.attempt.rejected { background: rgba(239, 68, 68, 0.12); color: #ef4444; }
+.item-emoji { font-size: 1rem; width: 1.2rem; text-align: center; }
+.item-name { width: 3.5rem; color: #666; font-size: 0.75rem; }
+.item-winner { font-weight: 700; font-size: 0.78rem; }
+.item-waiting { font-size: 0.72rem; color: #555; font-style: italic; }
+.item-attempts { display: flex; gap: 0.2rem; margin-left: auto; }
+.attempt-dot {
+  width: 8px; height: 8px; border-radius: 50%; cursor: help;
+  transition: transform 0.15s;
+}
+.attempt-dot:hover { transform: scale(1.5); }
 
 @keyframes flash-green { 0% { background: rgba(34, 197, 94, 0.2); } 100% { background: rgba(34, 197, 94, 0.05); } }
 .order.fulfilled { animation: flash-green 0.8s ease; }
