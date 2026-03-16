@@ -59,10 +59,22 @@ const val = await tx.take("slot");            // blocks until someone puts
 await tx.put("slot", result);                 // blocks until someone takes
 ```
 
-### `stm.atomic(ctx, handler)`
+### `stm.atomic(ctx, handler, onRetry?)`
 
 Run the handler atomically. Returns `{ committed: true, value }` on
-success, or `{ committed: false }` if the handler called `retry()`.
+success, or `{ committed: false, timedOut }` if the handler retried.
+
+If `onRetry` is provided, registers waiters so the transaction is
+re-run when watched TVars change. For timeout correctness, pass a
+stable `txId` that's the same across reruns:
+
+```typescript
+await stm.atomic(ctx, handler, {
+  callbackHandle: retryHandle,
+  callbackArgs: { orderId },
+  txId: `order:${orderId}:wait`,  // stable across retries
+});
+```
 
 ## Example: multi-item fulfillment
 

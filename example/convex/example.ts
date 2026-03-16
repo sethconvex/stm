@@ -191,25 +191,27 @@ export const webhookHandler = httpAction(async (ctx, request) => {
 });
 
 export const retryOrder = internalMutation({
-  args: { orderId: v.string(), items: v.string() },
-  handler: async (ctx, { orderId, items: itemsJson }) => {
+  args: { orderId: v.string(), items: v.string(), timeoutMs: v.optional(v.number()) },
+  handler: async (ctx, { orderId, items: itemsJson, timeoutMs: rawTimeout }) => {
     const order = await ctx.db.get(orderId as Id<"orders">);
     if (!order || order.status === "fulfilled" || order.status === "expired") return;
 
     const items: string[] = JSON.parse(itemsJson);
+    const timeoutMs = rawTimeout || undefined;
 
     // Phase 1: resubmit any rejected providers
     await stm.atomic(ctx, async (tx: TX) => submitAll(tx, orderId, items));
 
-    // Phase 2: check results
+    // Phase 2: check results — pass same txId and timeoutMs as initial run
+    // so timeout keys persist across retries
     const retryHandle: string = await createFunctionHandle(internal.example.retryOrder);
     const waitResult = await stm.atomic(
       ctx,
-      async (tx: TX) => awaitResults(tx, orderId, items),
+      async (tx: TX) => awaitResults(tx, orderId, items, timeoutMs),
       {
         callbackHandle: retryHandle,
-        callbackArgs: { orderId, items: itemsJson },
-        txId: `order:${orderId}:wait`,  // same txId as initial runOrder
+        callbackArgs: { orderId, items: itemsJson, timeoutMs: timeoutMs ?? 0 },
+        txId: `order:${orderId}:wait`,
       },
     );
 

@@ -169,19 +169,44 @@ export const cleanupPrefix = mutation({
   args: { prefix: v.string() },
   returns: v.null(),
   handler: async (ctx, { prefix }) => {
-    // Scan TVars for matching prefix (indexed by key, so range query works)
     const tvars = await ctx.db
       .query("tvars")
       .withIndex("by_key", (q) => q.gte("key", prefix).lt("key", prefix + "\uffff"))
       .take(500);
-    for (const t of tvars) await ctx.db.delete(t._id);
-    // Also clean waiters
     for (const t of tvars) {
+      await ctx.db.delete(t._id);
       const waiters = await ctx.db
         .query("waiters")
         .withIndex("by_tvar", (q) => q.eq("tvarKey", t.key))
         .collect();
       for (const w of waiters) await ctx.db.delete(w._id);
+    }
+    // If there are more, schedule another pass
+    if (tvars.length === 500) {
+      await ctx.scheduler.runAfter(0, internal.lib.cleanupPrefixContinue, { prefix });
+    }
+    return null;
+  },
+});
+
+export const cleanupPrefixContinue = internalMutation({
+  args: { prefix: v.string() },
+  returns: v.null(),
+  handler: async (ctx, { prefix }) => {
+    const tvars = await ctx.db
+      .query("tvars")
+      .withIndex("by_key", (q) => q.gte("key", prefix).lt("key", prefix + "\uffff"))
+      .take(500);
+    for (const t of tvars) {
+      await ctx.db.delete(t._id);
+      const waiters = await ctx.db
+        .query("waiters")
+        .withIndex("by_tvar", (q) => q.eq("tvarKey", t.key))
+        .collect();
+      for (const w of waiters) await ctx.db.delete(w._id);
+    }
+    if (tvars.length === 500) {
+      await ctx.scheduler.runAfter(0, internal.lib.cleanupPrefixContinue, { prefix });
     }
     return null;
   },
