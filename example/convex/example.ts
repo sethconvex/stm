@@ -234,15 +234,34 @@ export const retryFulfillment = internalMutation({
 // ═══════════════════════════════════════════════════════════════════════
 
 export const webhookHandler = httpAction(async (ctx, request) => {
-  const body = await request.json() as {
-    orderId: string; items: string; item: string; provider: string;
+  const body = (await request.json()) as {
+    orderId: string;
+    items: string;
+    item: string;
+    provider: string;
+    result: string; // "ready" or "rejected"
   };
 
-  // Provider says "I'm ready" — we atomically confirm or cancel
-  const result = await ctx.runMutation(internal.example.confirmOrCancel, body);
+  if (body.result === "ready") {
+    // Provider is ready to fulfill — atomically confirm or cancel
+    await ctx.runMutation(internal.example.confirmOrCancel, {
+      orderId: body.orderId,
+      items: body.items,
+      item: body.item,
+      provider: body.provider,
+    });
+  } else {
+    // Provider rejected — record it and retry with others
+    await ctx.runMutation(internal.example.handleResponse, {
+      orderId: body.orderId,
+      items: body.items,
+      item: body.item,
+      provider: body.provider,
+      result: body.result,
+    });
+  }
 
-  // The response tells the provider whether to proceed
-  return new Response(JSON.stringify({ decision: "see TVar" }), {
+  return new Response(JSON.stringify({ status: "ok" }), {
     status: 200,
     headers: { "Content-Type": "application/json" },
   });
