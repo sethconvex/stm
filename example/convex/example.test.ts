@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { initConvexTest } from "./setup.test";
 import { api } from "./_generated/api";
 
-describe("STM example", () => {
+describe("STM retry-wake demo", () => {
   beforeEach(async () => {
     vi.useFakeTimers();
   });
@@ -11,49 +11,39 @@ describe("STM example", () => {
     vi.useRealTimers();
   });
 
-  test("setup and atomic move conserves total", async () => {
+  test("restock then buy completes immediately", async () => {
     const t = initConvexTest();
     await t.mutation(api.example.setup, {});
 
-    const before = await t.query(api.example.readAll, {});
-    expect(before.gold + before.silver + before.bronze).toBe(140);
+    // Restock first
+    await t.mutation(api.example.restock, { item: "widgets", amount: 5 });
+    const stock = await t.query(api.example.readStock, {});
+    expect(stock.widgets).toBe(5);
 
-    await t.mutation(api.example.atomicMove, {
-      from: "bronze",
-      to: "gold",
-      amount: 5,
+    // Buy succeeds immediately
+    const result = await t.mutation(api.example.placeOrder, {
+      item: "widgets",
+      amount: 1,
     });
+    expect(result.immediate).toBe(true);
 
-    const after = await t.query(api.example.readAll, {});
-    expect(after.gold).toBe(15);
-    expect(after.bronze).toBe(95);
-    expect(after.gold + after.silver + after.bronze).toBe(140);
+    const stockAfter = await t.query(api.example.readStock, {});
+    expect(stockAfter.widgets).toBe(4);
   });
 
-  test("orElse takes gold first", async () => {
+  test("buy with no stock creates pending order", async () => {
     const t = initConvexTest();
     await t.mutation(api.example.setup, {});
 
-    const result = await t.mutation(api.example.takeBest, { amount: 1 });
-    expect(result.committed).toBe(true);
-    expect((result as any).value).toBe("gold");
+    // No stock — order goes pending
+    const result = await t.mutation(api.example.placeOrder, {
+      item: "widgets",
+      amount: 1,
+    });
+    expect(result.immediate).toBe(false);
 
-    const after = await t.query(api.example.readAll, {});
-    expect(after.gold).toBe(9);
-  });
-
-  test("orElse falls back when gold exhausted", async () => {
-    const t = initConvexTest();
-    await t.mutation(api.example.setup, {});
-
-    // Drain all gold
-    await t.mutation(api.example.takeBest, { amount: 10 });
-    const mid = await t.query(api.example.readAll, {});
-    expect(mid.gold).toBe(0);
-
-    // Now takeBest should fall back to silver
-    const result = await t.mutation(api.example.takeBest, { amount: 1 });
-    expect(result.committed).toBe(true);
-    expect((result as any).value).toBe("silver");
+    const orders = await t.query(api.example.listOrders, {});
+    expect(orders.length).toBe(1);
+    expect(orders[0].status).toBe("pending");
   });
 });
