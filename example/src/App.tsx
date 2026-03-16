@@ -1,7 +1,7 @@
 import "./App.css";
 import { useMutation, useQuery } from "convex/react";
 import { api } from "../convex/_generated/api";
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
 
 function useDebouncedCallback<T extends (...args: any[]) => any>(fn: T, ms: number): T {
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -327,33 +327,11 @@ function OrderFeed() {
   );
 }
 
-// ── App layout ────────────────────────────────────────────────────────
+// ── Code block with syntax highlighting ───────────────────────────────
 
-function App() {
-  const setup = useMutation(api.example.setup);
-  const placeOrder = useMutation(api.example.placeOrder);
-  const setAvail = useMutation(api.example.setAvailable);
-  const setSettings = useMutation(api.mockProviders.settings.set);
+declare const Prism: { highlightAll: () => void } | undefined;
 
-  return (
-    <div className="app">
-      <h1>Convex STM</h1>
-      <p className="subtitle">Multi-item fulfillment &mdash; race providers, first to accept wins</p>
-
-      <Walkthrough
-        onOrder={(items) => placeOrder({ items })}
-        onSetRate={(p, r) => setSettings({ provider: p, failRate: r })}
-        onSetMaxDelay={(p, t) => setSettings({ provider: p, maxDelay: t })}
-        onSetAvailable={(p, a) => setAvail({ provider: p, available: a })}
-      />
-
-      <div className="two-col">
-        <div className="col-left">
-          <OrderForm />
-          <button className="reset-btn" onClick={() => setup({})}>Reset</button>
-          <div className="panel code">
-            <h2>The code</h2>
-            <pre>{`// ── PHASE 1: SUBMIT ─────────────────────────────
+const CODE = `// ── PHASE 1: SUBMIT ─────────────────────────────
 // One transaction submits ALL items to ALL providers.
 // afterCommit schedules IO — only fires on commit.
 
@@ -398,8 +376,51 @@ const result = await stm.atomic(ctx, async (tx) => {
 
 // committed → every item has a winner → ship it
 // not committed → timed out → order expired
-// No partial orders. All items or nothing.`}</pre>
-          </div>
+// No partial orders. All items or nothing.`;
+
+function CodeBlock() {
+  const ref = useRef<HTMLElement>(null);
+
+  useEffect(() => {
+    if (ref.current && typeof Prism !== "undefined") {
+      Prism.highlightAll();
+    }
+  }, []);
+
+  return (
+    <div className="panel code">
+      <h2>The code</h2>
+      <pre><code ref={ref} className="language-typescript">{CODE}</code></pre>
+    </div>
+  );
+}
+
+// ── App layout ────────────────────────────────────────────────────────
+
+function App() {
+  const setup = useMutation(api.example.setup);
+  const placeOrder = useMutation(api.example.placeOrder);
+  const setAvail = useMutation(api.example.setAvailable);
+  const setSettings = useMutation(api.mockProviders.settings.set);
+
+  return (
+    <div className="app">
+      <h1>Convex STM</h1>
+      <p className="subtitle">Multi-item fulfillment &mdash; race providers, first to accept wins</p>
+
+      <Walkthrough
+        onOrder={(items) => placeOrder({ items })}
+        onSetRate={(p, r) => setSettings({ provider: p, failRate: r })}
+        onSetMaxDelay={(p, t) => setSettings({ provider: p, maxDelay: t })}
+        onSetAvailable={(p, a) => setAvail({ provider: p, available: a })}
+      />
+
+      <div className="two-col">
+        <div className="col-left">
+          <OrderForm />
+          <button className="reset-btn" onClick={() => setup({})}>Reset</button>
+          <CodeBlock />
+
         </div>
         <div className="col-right">
           <ProviderStatus />
